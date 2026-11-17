@@ -154,19 +154,19 @@ def live_panel():
         fig.add_bar(x=timeline["minute"], y=timeline["alerts"], name="Alerts", marker_color="#E45756")
         fig.update_layout(barmode="overlay", height=280, margin=dict(l=10, r=10, t=30, b=10),
                           title="Flows scored per minute (last 3 hours)", legend=dict(orientation="h"))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     left, right = st.columns([3, 1])
     with left:
         st.subheader("Most recent flows")
         r = recent.copy()
         r["p_attack"] = r["p_attack"].round(4)
         r["ae_score"] = r["ae_score"].round(3)
-        st.dataframe(r, use_container_width=True, height=380, hide_index=True)
+        st.dataframe(r, width="stretch", height=380, hide_index=True)
     with right:
         st.subheader("Protocols (24h)")
         if not proto.empty:
             st.plotly_chart(px.pie(proto, names="proto", values="n", hole=0.5).update_layout(
-                height=300, margin=dict(l=0, r=0, t=0, b=0), showlegend=True), use_container_width=True)
+                height=300, margin=dict(l=0, r=0, t=0, b=0), showlegend=True), width="stretch")
 
 
 with tab_live:
@@ -195,7 +195,7 @@ with tab_alerts:
         sev = f1.multiselect("Severity", ["high", "medium", "low"], default=["high", "medium", "low"])
         status = f2.multiselect("Status", ["open", "acknowledged"], default=["open", "acknowledged"])
         view = al[al["severity"].isin(sev) & al["status"].isin(status)]
-        st.dataframe(view.drop(columns=["explanation", "flow_id"]), use_container_width=True, height=300, hide_index=True)
+        st.dataframe(view.drop(columns=["explanation", "flow_id"]), width="stretch", height=300, hide_index=True)
         if not view.empty:
             pick = st.selectbox("Explain alert", view["id"].tolist(),
                                 format_func=lambda i: f"#{i} · " + view.set_index("id").loc[i, "summary"][:110])
@@ -209,7 +209,7 @@ with tab_alerts:
             m3.metric("Flow", f"{a['src_ip']} → {a['dst_ip']}:{a['dst_port']}/{a['proto']}")
             fig = shap_chart(a["explanation"])
             if fig:
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
             if a["status"] == "open" and st.button("Acknowledge alert"):
                 with psycopg.connect(_conn_url(), prepare_threshold=None) as conn:
                     conn.execute("update safenet.alerts set status='acknowledged' where id=%s", (int(pick),))
@@ -244,7 +244,7 @@ with tab_eval:
         cols = [c for c in ["train", "setting", "model", "precision", "recall", "f1", "fpr", "roc_auc", "macro_f1_category"]
                 if c in ind]
         st.dataframe(ind[cols].rename(columns={"train": "dataset", "setting": "features"}).round(4),
-                     use_container_width=True, hide_index=True)
+                     width="stretch", hide_index=True)
 
         st.subheader("2 · Cross-dataset generalisation")
         cr = _metrics_frame(ev, "cross_dataset")
@@ -258,7 +258,7 @@ with tab_eval:
                 fig.update_layout(height=300, margin=dict(l=10, r=10, t=40, b=10), coloraxis_showscale=False)
                 fig.update_xaxes(title="tested on")
                 fig.update_yaxes(title="trained on")
-                cc[i].plotly_chart(fig, use_container_width=True)
+                cc[i].plotly_chart(fig, width="stretch")
 
         st.subheader("3 · Rare attacks: detection rate per original label")
         rows = []
@@ -274,7 +274,7 @@ with tab_eval:
             fig = px.bar(sub.sort_values("n_test"), x="detected", y="label", color="model", barmode="group",
                          orientation="h", hover_data=["n_test"], range_x=[0, 1])
             fig.update_layout(height=max(350, 28 * sub["label"].nunique() * 1.6), margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
             st.caption("For BENIGN/Normal the bar is the false-alarm rate; for attacks it is recall.")
 
         st.subheader("4 · Robustness against adaptive evasion")
@@ -284,11 +284,11 @@ with tab_eval:
                           labels={"eps": "attacker budget ε (padding / slow-down / dummy-packet ratio)",
                                   "detection_rate": "attacks still detected"})
             fig.update_layout(height=360, yaxis_range=[0, 1.02], margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
         at = _metrics_frame(ev, "adv_training")
         if not at.empty:
             st.markdown("Clean-traffic performance before vs after adversarial training (combined test set):")
-            st.dataframe(at.drop(columns=["train", "test", "setting"]).round(4), use_container_width=True, hide_index=True)
+            st.dataframe(at.drop(columns=["train", "test", "setting"]).round(4), width="stretch", hide_index=True)
 
         st.subheader("5 · What the models rely on (global SHAP)")
         if not imp.empty:
@@ -300,7 +300,7 @@ with tab_eval:
             sub["feature"] = sub["feature"].map(lambda f: FEATURE_LABELS.get(f, f))
             fig = px.bar(sub.iloc[::-1], x="mean_abs_shap", y="feature", orientation="h")
             fig.update_layout(height=450, margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
 with tab_about:
     st.markdown("""
