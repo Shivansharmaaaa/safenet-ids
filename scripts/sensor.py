@@ -95,6 +95,10 @@ class Scorer:
         return out
 
 
+# mDNS, LLMNR, SSDP, NetBIOS name/datagram, WS-Discovery: LAN discovery chatter absent from both datasets
+DISCOVERY_PORTS = {5353, 5355, 1900, 137, 138, 3702}
+
+
 def out_of_scope(r: FlowRecord) -> str | None:
     """Flows the models were never trained to judge. They are still scored, stored and
     checked against threat-intel blocklists, but cannot raise an ML alert."""
@@ -106,6 +110,8 @@ def out_of_scope(r: FlowRecord) -> str | None:
             return "local multicast/broadcast service discovery"
     except ValueError:
         pass
+    if r.proto == "udp" and (r.dst_port in DISCOVERY_PORTS or r.src_port in DISCOVERY_PORTS):
+        return "local service discovery (mDNS/LLMNR/SSDP/NetBIOS/WS-Discovery)"
     return None
 
 
@@ -155,16 +161,15 @@ def flush(conn, sensor_id: int, scorer: Scorer, recs: list[FlowRecord], stats: d
     if not recs:
         return
     scored = scorer.score(recs)
-    n_alert = 0
-    for rec in scored:
-        flow_id = db.insert_flow(conn, sensor_id, rec)
-        if "alert" in rec:
-            db.insert_alert(conn, flow_id, rec["alert"])
-            n_alert += 1
-            if enricher:
-                enricher.submit(rec["alert"]["remote_ip"])
-            log(f"ALERT {rec['alert']['severity']:6s} {rec['alert']['label']:11s} p={rec['p_attack']:.3f} "
-                f"{rec['src_ip']}:{rec['src_port']} -> {rec['dst_ip']}:{rec['dst_port']}/{rec['proto']}")
+    ids = db.insert_flows(conn, sensor_id, scored)          # one round trip per 500 flows
+    alerts = [(fid, rec["alert"]) for fid, rec in zip(ids, scored) if "alert" in rec]
+    db.insert_alerts(conn, alerts)
+    n_alert = len(alerts)
+    for _, a in alerts:
+        if enricher:
+            enricher.submit(a["remote_ip"])
+        log(f"ALERT {a['severity']:6s} {a['label']:11s} p={a['p_attack']:.3f} "
+            f"{a['src_ip']} -> {a['dst_ip']}:{a['dst_port']}/{a['proto']}")
     stats["flows"] += len(scored)
     db.heartbeat(conn, sensor_id, stats["packets"], stats["flows"])
     conn.commit()

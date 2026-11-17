@@ -85,6 +85,45 @@ def insert_flow(conn, sensor_id: int, rec: dict[str, Any]) -> int:
     return row[0]
 
 
+_FLOW_COLS = ("sensor_id, ts_start, ts_end, src_ip, src_port, dst_ip, dst_port, proto, features, pred_label, "
+              "p_attack, ae_score, ae_anomaly, is_alert, suppressed")
+_FLOW_ROW = ("(%s::bigint, to_timestamp(%s::float8), to_timestamp(%s::float8), %s::text, %s::int, %s::text, %s::int, "
+             "%s::text, %s::jsonb, %s::text, %s::float8, %s::float8, %s::bool, %s::bool, %s::text)")
+
+
+def insert_flows(conn, sensor_id: int, recs: list[dict[str, Any]], chunk: int = 500) -> list[int]:
+    """Insert many flows with ONE round trip per chunk (the DB may be on another continent).
+    Returns the new ids in input order."""
+    ids: list[int] = []
+    for i in range(0, len(recs), chunk):
+        part = recs[i:i + chunk]
+        params: list = []
+        for r in part:
+            params += [sensor_id, r["ts_start"], r["ts_end"], r["src_ip"], r["src_port"], r["dst_ip"], r["dst_port"],
+                       r["proto"], Jsonb(_clean(r["features"])), r["pred_label"], r["p_attack"], r["ae_score"],
+                       r["ae_anomaly"], r["is_alert"], r.get("suppressed")]
+        # ordinality keeps the RETURNING order identical to the input order
+        sql = (f"with v({_FLOW_COLS}, ord) as (values "
+               + ",".join(_FLOW_ROW[:-1] + f", {k})" for k in range(len(part)))
+               + f") insert into safenet.flows({_FLOW_COLS}) select {_FLOW_COLS} from v order by ord returning id")
+        ids += [row[0] for row in conn.execute(sql, params).fetchall()]
+    return ids
+
+
+def insert_alerts(conn, items: list[tuple[int, dict[str, Any]]]) -> None:
+    if not items:
+        return
+    params: list = []
+    for flow_id, a in items:
+        params += [flow_id, a["severity"], a["label"], a["p_attack"], a["ae_score"], a["src_ip"], a["dst_ip"],
+                   a["dst_port"], a["proto"], Jsonb(_clean(a["explanation"])), a["summary"], a.get("remote_ip"),
+                   Jsonb(_clean(a.get("mitre", []))), Jsonb(_clean(a.get("intel_hits", [])))]
+    conn.execute(
+        "insert into safenet.alerts(flow_id, severity, label, p_attack, ae_score, src_ip, dst_ip, dst_port, proto, "
+        "explanation, summary, remote_ip, mitre, intel_hits) values "
+        + ",".join(["(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"] * len(items)), params)
+
+
 def insert_alert(conn, flow_id: int, a: dict[str, Any]) -> None:
     conn.execute(
         """insert into safenet.alerts(flow_id, severity, label, p_attack, ae_score, src_ip, dst_ip, dst_port, proto,
