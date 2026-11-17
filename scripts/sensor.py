@@ -17,7 +17,7 @@ import joblib
 import numpy as np
 
 from safenet import db
-from safenet.config import MODELS_DIR, database_url
+from safenet.config import MODELS_DIR, ROOT, database_url
 from safenet.explain import AlertExplainer
 from safenet.features import to_model_space
 from safenet.flowmeter import FlowRecord, FlowTable
@@ -141,6 +141,11 @@ def main():
         sniffer = AsyncSniffer(iface=args.iface or None, prn=table.on_packet, store=False, filter="ip or ip6")
         sniffer.start()
         last_prune = 0.0
+        errors = 0
+        # When the model bundle or .env (database URL) changes, exit cleanly; launchd
+        # (KeepAlive) restarts the sensor with the new model / database.
+        watched = [MODELS_DIR / "live_bundle.joblib", ROOT / ".env"]
+        mtimes = {p: p.stat().st_mtime if p.exists() else 0 for p in watched}
         try:
             while not STOP:
                 time.sleep(args.interval)
@@ -151,9 +156,21 @@ def main():
                         db.prune(conn, keep_days=3)
                         conn.commit()
                         last_prune = time.time()
+                    errors = 0
                 except Exception as e:  # keep sensing even if one DB write fails
-                    conn.rollback()
-                    log(f"db error: {e!r}")
+                    errors += 1
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    log(f"db error ({errors}): {e!r}")
+                    if errors >= 5:
+                        log("database unreachable; exiting so the service restarts with a fresh connection")
+                        break
+                changed = [p.name for p in watched if (p.stat().st_mtime if p.exists() else 0) != mtimes[p]]
+                if changed:
+                    log(f"{changed} changed; restarting sensor to pick up new model/config")
+                    break
         finally:
             sniffer.stop()
             stats["packets"] = table.packets
