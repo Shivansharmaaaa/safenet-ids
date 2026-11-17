@@ -237,7 +237,7 @@ def d_eval():
 
 # ============================================================================ ui helpers
 def fig_style(fig, h=320, legend=True):
-    fig.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+    fig.update_layout(legend_title_text="", template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                       font=dict(family="Inter, sans-serif", color=C["text"], size=12), height=h,
                       margin=dict(l=8, r=8, t=36, b=8), colorway=SERIES, showlegend=legend,
                       legend=dict(orientation="h", y=1.02, yanchor="bottom", x=1, xanchor="right", bgcolor="rgba(0,0,0,0)"),
@@ -346,7 +346,7 @@ def page_overview():
                 al = tl[tl["alerts"] > 0]
                 fig.add_trace(go.Scatter(x=al["t"], y=al["flows"], name="Minutes with alerts", mode="markers",
                                          marker=dict(color=C["high"], size=9, line=dict(color="#fff", width=1))))
-                st.plotly_chart(fig_style(fig.update_layout(title="Traffic · last 3 hours"), 300), width="stretch")
+                st.plotly_chart(fig_style(fig.update_layout(title="Traffic · last 3 hours (UTC)"), 300), width="stretch")
         with right:
             fl = d_flows(1500)
             if not fl.empty:
@@ -443,11 +443,17 @@ def ip_intel_panel(ip: str | None):
     chips = "".join(f"<span class='sn-chip'>port {p}</span>" for p in sh.get("ports", [])[:20])
     chips += "".join(f"<span class='sn-chip'>{h}</span>" for h in sh.get("hostnames", [])[:6])
     chips += "".join(f"<span class='sn-chip'>#{t}</span>" for t in sh.get("tags", []))
-    vulns = sh.get("vulns", [])
     kev = set(sh.get("kev", []))
+    all_v = sh.get("vulns", [])
+    vulns = sorted(v for v in all_v if v in kev) + sorted((v for v in all_v if v not in kev), reverse=True)  # KEV first
     chips += "".join(f"<a class='sn-chip {'kev' if v in kev else ''}' target='_blank' "
-                     f"href='https://nvd.nist.gov/vuln/detail/{v}'>{'⚠ KEV ' if v in kev else ''}{v}</a>" for v in vulns[:30])
+                     f"href='https://nvd.nist.gov/vuln/detail/{v}'>{'⚠ CISA KEV · ' if v in kev else ''}{v}</a>"
+                     for v in vulns[:30])
     st.markdown(chips or "<span class='sn-chip'>Shodan: no exposed services recorded</span>", unsafe_allow_html=True)
+    if vulns:
+        st.caption(f"Shodan lists {len(vulns)} CVEs for software on this host"
+                   + (f", {len(kev)} of them in CISA's Known Exploited Vulnerabilities catalog" if kev else "")
+                   + (f" (showing 30)" if len(vulns) > 30 else "") + ".")
     if gn:
         cls = "known benign service (RIOT)" if gn.get("riot") else ("internet scanner (noise)" if gn.get("noise")
                                                                      else "not seen scanning the internet")
@@ -456,7 +462,8 @@ def ip_intel_panel(ip: str | None):
                     f"[AbuseIPDB](https://www.abuseipdb.com/check/{ip})")
     for h in d.get("blocklists") or []:
         st.error(f"Listed on {h['name']} {h.get('netblock', '')} · [details]({h['url']})")
-    st.caption(f"Looked up {ago(row.iloc[0]['fetched_at'])} · sources: {d.get('sources')}")
+    src = " · ".join(f"{k}: {v}" for k, v in (d.get("sources") or {}).items())
+    st.caption(f"Looked up {ago(row.iloc[0]['fetched_at'])} · {src}")
 
 
 def page_alerts():
@@ -465,8 +472,8 @@ def page_alerts():
     if al.empty:
         st.markdown("<div class='sn-card'><h4>No alerts yet</h4>The sensor raises an alert when the adversarially "
                     "trained XGBoost scores a TCP/UDP flow ≥ 0.90, when the autoencoder reconstruction error is "
-                    "≥ 5× its benign threshold, or when the remote IP appears on the abuse.ch Feodo Tracker or Spamhaus "
-                    "DROP lists.</div>", unsafe_allow_html=True)
+                    "≥ 5× its benign threshold, when a behavioural rule fires (port scan, sweep, brute force) or when "
+                    "the remote IP appears on the abuse.ch Feodo Tracker or Spamhaus DROP lists.</div>", unsafe_allow_html=True)
         return
     f1, f2, f3 = st.columns([1, 1, 1.4])
     sev = f1.pills("Severity", ["high", "medium", "low"], default=["high", "medium", "low"], selection_mode="multi")
@@ -496,13 +503,34 @@ def page_alerts():
         section(f"Alert #{a['id']}")
         st.markdown(alert_card(a), unsafe_allow_html=True)
         m1, m2, m3 = st.columns(3)
-        m1.metric("XGBoost attack probability", f"{a['p_attack']:.3f}")
-        m2.metric("Autoencoder error", f"{a['ae_score']:.3f}",
-                  help=f"benign threshold {(a['explanation'] or {}).get('ae_threshold', float('nan')):.3f}")
+        ex = a["explanation"] or {}
+        if ex.get("detector") == "behavioral":
+            evd = ex.get("evidence", {})
+            key, val = next(((k, v) for k, v in evd.items() if k in ("distinct_ports", "distinct_hosts", "connections")),
+                            ("events", "–"))
+            m1.metric("Detector", "Behavioural rule")
+            m2.metric(key.replace("_", " ").capitalize(), f"{val}", help=f"threshold {evd.get('threshold')} in "
+                                                                           f"{int(evd.get('window_s', 60))} s")
+        else:
+            m1.metric("XGBoost attack probability", f"{a['p_attack']:.3f}")
+            m2.metric("Autoencoder error", f"{a['ae_score']:.3f}",
+                      help=f"benign threshold {ex.get('ae_threshold', float('nan')):.3f}")
         m3.metric("Status", a["status"])
-        t1, t2, t3 = st.tabs(["Why (SHAP)", "Remote IP intelligence", "Flow features"])
+        t1, t2, t3 = st.tabs(["Why", "Remote IP intelligence", "Flow features"])
         with t1:
-            contrib = pd.DataFrame((a["explanation"] or {}).get("contributions", []))
+            expl = a["explanation"] or {}
+            if expl.get("detector") == "behavioral":
+                st.markdown(f"<div class='sn-card'><h4>Behavioural rule · {expl.get('rule')}</h4>"
+                            f"This alert comes from SafeNet's multi-flow detector, which aggregates flows from the "
+                            f"same source over a {int(expl.get('evidence', {}).get('window_s', 60))} s window. Per-flow "
+                            f"models see each probe as an ordinary short connection.</div>", unsafe_allow_html=True)
+                evd = dict(expl.get("evidence", {}))
+                samples = evd.pop("sample_ports", None) or evd.pop("sample_hosts", None) or []
+                st.dataframe(pd.DataFrame([{"evidence": k.replace("_", " "), "value": str(v)} for k, v in evd.items()]),
+                             hide_index=True, width="stretch")
+                if samples:
+                    st.markdown("".join(f"<span class='sn-chip mono'>{x}</span>" for x in samples), unsafe_allow_html=True)
+            contrib = pd.DataFrame(expl.get("contributions", []))
             if not contrib.empty:
                 contrib["label"] = contrib.apply(lambda r: f"{FEATURE_LABELS.get(r['feature'], r['feature'])} = "
                                                            f"{r['value']:,.4g}", axis=1)
@@ -562,9 +590,11 @@ def page_intel():
     df = pd.DataFrame(rows)
     geo = df.dropna(subset=["lat", "lon"])
     if not geo.empty:
-        fig = px.scatter_geo(geo, lat="lat", lon="lon", size=geo["alerts"].clip(lower=1), color="blocklisted",
+        geo = geo.assign(status=geo["blocklisted"].map({True: "On a blocklist", False: "Not blocklisted"}))
+        fig = px.scatter_geo(geo, lat="lat", lon="lon", size=geo["alerts"].clip(lower=1), color="status",
                              hover_name="ip", hover_data=["org", "country", "open_ports", "cves"],
-                             color_discrete_map={True: C["high"], False: C["accent"]}, projection="natural earth")
+                             color_discrete_map={"On a blocklist": C["high"], "Not blocklisted": C["accent"]},
+                             projection="natural earth")
         fig.update_geos(bgcolor="rgba(0,0,0,0)", showcountries=True, countrycolor="#334155", showland=True,
                         landcolor=C["surface2"], showocean=True, oceancolor=C["bg"], coastlinecolor="#334155")
         st.plotly_chart(fig_style(fig.update_layout(title="Where alerted traffic went"), 420), width="stretch")
@@ -649,7 +679,7 @@ def page_models():
             a, b = st.columns(2)
             dsel = a.segmented_control("Dataset", sorted(pl["dataset"].dropna().unique()), default="CIC-IDS2017")
             fsel = b.segmented_control("Features", sorted(pl["features"].unique()), default="native")
-            sub = pl[(pl["dataset"] == dsel) & (pl["features"] == fsel)].sort_values("n_test")
+            sub = pl[(pl["dataset"] == dsel) & (pl["features"] == fsel)].sort_values("n_test", ascending=False)
             fig = px.bar(sub, x="detected", y="label", color="model", barmode="group", orientation="h",
                          hover_data=["n_test"], range_x=[0, 1], title="Detection rate per attack label (rarest at top)")
             st.plotly_chart(fig_style(fig, max(380, 26 * sub["label"].nunique() * 2)), width="stretch")
@@ -702,7 +732,9 @@ enrichment → PostgreSQL (Supabase) → this console (Streamlit, Google sign-in
 </div>
 <div class='sn-card'><h4>Alert policy</h4>
 A flow raises an alert when the adversarially-trained XGBoost scores it ≥ 0.90, when the autoencoder error is ≥ 5×
-its benign threshold, or when the remote IP is on a blocklist. ICMP and other non-TCP/UDP protocols, and local
+its benign threshold, or when the remote IP is on a blocklist. Behavioural rules over a 60 s window add multi-flow
+detections the per-flow models cannot see: vertical port scans (≥ 25 ports on one host), horizontal sweeps
+(≥ 25 hosts on one port) and brute force (≥ 15 short sessions to SSH/RDP/FTP/SMB/database ports). ICMP and other non-TCP/UDP protocols, and local
 multicast/broadcast discovery (mDNS, SSDP), are outside what the models were trained on: they are still scored
 and stored (marked <i>suppressed</i>) and still checked against the blocklists, but cannot raise an ML alert.</div>
 <div class='sn-card'><h4>Privacy</h4>
@@ -718,7 +750,7 @@ with st.sidebar:
                 f"<div style='font-weight:800;font-size:1.1rem'>SafeNet</div></div>", unsafe_allow_html=True)
 
 pages = [
-    st.Page(page_overview, title="Overview", icon=":material/space_dashboard:", url_path="overview", default=True),
+    st.Page(page_overview, title="Overview", icon=":material/space_dashboard:", default=True),
     st.Page(page_traffic, title="Live traffic", icon=":material/lan:", url_path="traffic"),
     st.Page(page_alerts, title="Alerts", icon=":material/notification_important:", url_path="alerts"),
     st.Page(page_intel, title="Threat intel", icon=":material/travel_explore:", url_path="intel"),

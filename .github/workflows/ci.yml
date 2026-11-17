@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: |
+          pip install numpy pandas pyarrow scapy python-dotenv pytest
+          pip install -r requirements.txt
+      - name: Unit tests (flow meter, feature mapping, adversarial, behaviour rules, policy, intel)
+        run: python -m pytest -q tests
+      - name: Dashboard smoke test (renders and fails safely without a database)
+        run: |
+          python - <<'PY'
+          from streamlit.testing.v1 import AppTest
+          at = AppTest.from_file("streamlit_app.py", default_timeout=60).run()
+          assert not at.exception, at.exception
+          assert any("DATABASE_URL" in e.value for e in at.error), [e.value for e in at.error]
+          print("dashboard smoke test ok")
+          PY

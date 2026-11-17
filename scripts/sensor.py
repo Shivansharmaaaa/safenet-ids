@@ -7,7 +7,6 @@ usage (needs root for packet capture on macOS/Linux):
 from __future__ import annotations
 
 import argparse
-import ipaddress
 import queue
 import signal
 import socket
@@ -20,10 +19,12 @@ import joblib
 import numpy as np
 
 from safenet import db
+from safenet.behavior import BehaviorDetector
 from safenet.config import MODELS_DIR, ROOT, database_url
 from safenet.explain import AlertExplainer
 from safenet.features import to_model_space
 from safenet.flowmeter import FlowRecord, FlowTable
+from safenet.policy import out_of_scope
 from safenet.intel import ThreatFeeds, enrich_ip, mitre_for, remote_ip
 
 STOP = False
@@ -77,6 +78,7 @@ class Scorer:
                 expl = self.explainer.explain(X[i], raw[i])
                 expl["ae_score"] = float(ae_s[i])
                 expl["ae_threshold"] = float(self.ae.threshold)
+                expl["detector"] = "threat-intel" if hits else ("ml" if p >= self.thr else "autoencoder")
                 if hits:
                     alert_label, severity = "ThreatIntel", "high"
                     summary = (f"ThreatIntel: {rip} is listed on " + ", ".join(h["name"] for h in hits)
@@ -95,26 +97,6 @@ class Scorer:
         return out
 
 
-# mDNS, LLMNR, SSDP, NetBIOS name/datagram, WS-Discovery: LAN discovery chatter absent from both datasets
-DISCOVERY_PORTS = {5353, 5355, 1900, 137, 138, 3702}
-
-
-def out_of_scope(r: FlowRecord) -> str | None:
-    """Flows the models were never trained to judge. They are still scored, stored and
-    checked against threat-intel blocklists, but cannot raise an ML alert."""
-    if r.proto not in ("tcp", "udp"):
-        return f"protocol {r.proto} not in training data (TCP/UDP only)"
-    try:
-        a = ipaddress.ip_address(r.dst_ip)
-        if a.is_multicast or r.dst_ip.endswith(".255") or a.is_link_local:
-            return "local multicast/broadcast service discovery"
-    except ValueError:
-        pass
-    if r.proto == "udp" and (r.dst_port in DISCOVERY_PORTS or r.src_port in DISCOVERY_PORTS):
-        return "local service discovery (mDNS/LLMNR/SSDP/NetBIOS/WS-Discovery)"
-    return None
-
-
 class Enricher(threading.Thread):
     """Background worker: looks up public IPs from alerts in ipwho.is / Shodan / GreyNoise."""
 
@@ -131,17 +113,20 @@ class Enricher(threading.Thread):
     def run(self) -> None:
         while True:
             ip = self.q.get()
-            try:
-                with db.connect(self.url) as conn:
-                    if not db.ip_intel_fresh(conn, ip):
-                        data = enrich_ip(ip, self.feeds.kev)
-                        data["blocklists"] = self.feeds.match(ip)
-                        db.save_ip_intel(conn, ip, data)
-                        conn.commit()
-                        log(f"intel {ip}: {data.get('geo', {}).get('country')} {data.get('geo', {}).get('org')} "
-                            f"sources={data['sources']}")
-            except Exception as e:
-                log(f"intel error for {ip}: {e!r}")
+            for attempt in range(1, 4):  # the network / database can be briefly unreachable
+                try:
+                    with db.connect(self.url) as conn:
+                        if not db.ip_intel_fresh(conn, ip):
+                            data = enrich_ip(ip, self.feeds.kev)
+                            data["blocklists"] = self.feeds.match(ip)
+                            db.save_ip_intel(conn, ip, data)
+                            conn.commit()
+                            log(f"intel {ip}: {data.get('geo', {}).get('country')} {data.get('geo', {}).get('org')} "
+                                f"sources={data['sources']}")
+                    break
+                except Exception as e:
+                    log(f"intel error for {ip} (attempt {attempt}/3): {str(e)[:160]!r}")
+                    time.sleep(10 * attempt)
             time.sleep(1.5)  # stay well inside the free APIs' rate limits
 
 
@@ -156,6 +141,9 @@ def db_host_ips(url: str) -> set[str]:
     return ips
 
 
+BEHAVIOR = BehaviorDetector()
+
+
 def flush(conn, sensor_id: int, scorer: Scorer, recs: list[FlowRecord], stats: dict,
           enricher: Enricher | None = None) -> None:
     if not recs:
@@ -163,6 +151,14 @@ def flush(conn, sensor_id: int, scorer: Scorer, recs: list[FlowRecord], stats: d
     scored = scorer.score(recs)
     ids = db.insert_flows(conn, sensor_id, scored)          # one round trip per 500 flows
     alerts = [(fid, rec["alert"]) for fid, rec in zip(ids, scored) if "alert" in rec]
+    # multi-flow behavioural rules (port scans, sweeps, brute force)
+    for fid, a in BEHAVIOR.update(recs, ids, scored):
+        a["remote_ip"] = remote_ip(a["src_ip"], a["dst_ip"])
+        a["mitre"] = mitre_for(a["label"])
+        a["intel_hits"] = scorer.feeds.match(a["remote_ip"]) if (scorer.feeds and a["remote_ip"]) else []
+        alerts.append((fid, a))
+    if alerts:
+        conn.execute("update safenet.flows set is_alert = true where id = any(%s)", ([f for f, _ in alerts],))
     db.insert_alerts(conn, alerts)
     n_alert = len(alerts)
     for _, a in alerts:
