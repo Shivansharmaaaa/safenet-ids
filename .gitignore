@@ -9,3 +9,4 @@ artifacts/models/
 *.pcapng
 .DS_Store
 logs/
+streamlit_cloud_secrets.toml

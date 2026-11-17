@@ -1,4 +1,4 @@
-"""SafeNet live sensor: capture real packets -> flows -> ML scoring -> SHAP -> database.
+"""SafeNet live sensor: capture real packets -> flows -> ML scoring -> SHAP -> threat intel -> database.
 
 usage (needs root for packet capture on macOS/Linux):
     sudo .venv/bin/python -m scripts.sensor --iface en0
@@ -7,9 +7,12 @@ usage (needs root for packet capture on macOS/Linux):
 from __future__ import annotations
 
 import argparse
+import ipaddress
+import queue
 import signal
 import socket
 import sys
+import threading
 import time
 from urllib.parse import urlparse
 
@@ -21,6 +24,7 @@ from safenet.config import MODELS_DIR, ROOT, database_url
 from safenet.explain import AlertExplainer
 from safenet.features import to_model_space
 from safenet.flowmeter import FlowRecord, FlowTable
+from safenet.intel import ThreatFeeds, enrich_ip, mitre_for, remote_ip
 
 STOP = False
 
@@ -30,7 +34,7 @@ def log(msg: str) -> None:
 
 
 class Scorer:
-    def __init__(self, path=MODELS_DIR / "live_bundle.joblib"):
+    def __init__(self, feeds: ThreatFeeds | None = None, path=MODELS_DIR / "live_bundle.joblib"):
         b = joblib.load(path)
         self.version = b["version"]
         self.features = b["features"]
@@ -41,6 +45,7 @@ class Scorer:
         self.thr = float(b["alert_threshold"])
         self.explainer = AlertExplainer(self.det, self.features)
         self.benign_i = self.cats.index("Benign")
+        self.feeds = feeds
 
     def score(self, recs: list[FlowRecord]) -> list[dict]:
         raw = np.vstack([r.vector() for r in recs])
@@ -55,26 +60,83 @@ class Scorer:
             p = float(p_att[i])
             anomaly = bool(ae_s[i] > self.ae.threshold)
             strong_anomaly = bool(ae_s[i] > 5 * self.ae.threshold and (r.fwd_pkts + r.bwd_pkts) >= 3)
-            is_alert = p >= self.thr or strong_anomaly
+            rip = remote_ip(r.src_ip, r.dst_ip)
+            hits = self.feeds.match(rip) if (self.feeds and rip) else []
+            model_alert = p >= self.thr or strong_anomaly
+            scope = out_of_scope(r)
+            suppressed = scope if (model_alert and scope) else None
+            is_alert = (model_alert and not scope) or bool(hits)
             label = cat_lab[i] if p >= 0.5 else "Benign"
             rec = dict(
                 ts_start=r.first_ts, ts_end=r.last_ts, src_ip=r.src_ip, src_port=r.src_port, dst_ip=r.dst_ip,
                 dst_port=r.dst_port, proto=r.proto, features=dict(zip(self.features, raw[i].tolist())),
                 pred_label=label, p_attack=p, ae_score=float(ae_s[i]), ae_anomaly=anomaly, is_alert=is_alert,
+                suppressed=suppressed,
             )
             if is_alert:
                 expl = self.explainer.explain(X[i], raw[i])
-                alert_label = cat_lab[i] if p >= self.thr else "Anomaly"
-                severity = "high" if (p >= 0.98 or (p >= self.thr and anomaly)) else ("medium" if p >= self.thr else "low")
                 expl["ae_score"] = float(ae_s[i])
                 expl["ae_threshold"] = float(self.ae.threshold)
+                if hits:
+                    alert_label, severity = "ThreatIntel", "high"
+                    summary = (f"ThreatIntel: {rip} is listed on " + ", ".join(h["name"] for h in hits)
+                               + f" (model attack score {p:.2f}).")
+                else:
+                    alert_label = cat_lab[i] if p >= self.thr else "Anomaly"
+                    severity = ("high" if (p >= 0.98 or (p >= self.thr and anomaly))
+                                else ("medium" if p >= self.thr else "low"))
+                    summary = AlertExplainer.summarise(alert_label, expl)
                 rec["alert"] = dict(
                     severity=severity, label=alert_label, p_attack=p, ae_score=float(ae_s[i]), src_ip=r.src_ip,
-                    dst_ip=r.dst_ip, dst_port=r.dst_port, proto=r.proto, explanation=expl,
-                    summary=AlertExplainer.summarise(alert_label, expl),
+                    dst_ip=r.dst_ip, dst_port=r.dst_port, proto=r.proto, explanation=expl, summary=summary,
+                    remote_ip=rip, mitre=mitre_for(alert_label), intel_hits=hits,
                 )
             out.append(rec)
         return out
+
+
+def out_of_scope(r: FlowRecord) -> str | None:
+    """Flows the models were never trained to judge. They are still scored, stored and
+    checked against threat-intel blocklists, but cannot raise an ML alert."""
+    if r.proto not in ("tcp", "udp"):
+        return f"protocol {r.proto} not in training data (TCP/UDP only)"
+    try:
+        a = ipaddress.ip_address(r.dst_ip)
+        if a.is_multicast or r.dst_ip.endswith(".255") or a.is_link_local:
+            return "local multicast/broadcast service discovery"
+    except ValueError:
+        pass
+    return None
+
+
+class Enricher(threading.Thread):
+    """Background worker: looks up public IPs from alerts in ipwho.is / Shodan / GreyNoise."""
+
+    def __init__(self, url: str, feeds: ThreatFeeds):
+        super().__init__(daemon=True)
+        self.url, self.feeds, self.q = url, feeds, queue.Queue()
+        self.seen: dict[str, float] = {}
+
+    def submit(self, ip: str | None) -> None:
+        if ip and time.time() - self.seen.get(ip, 0) > 3600:
+            self.seen[ip] = time.time()
+            self.q.put(ip)
+
+    def run(self) -> None:
+        while True:
+            ip = self.q.get()
+            try:
+                with db.connect(self.url) as conn:
+                    if not db.ip_intel_fresh(conn, ip):
+                        data = enrich_ip(ip, self.feeds.kev)
+                        data["blocklists"] = self.feeds.match(ip)
+                        db.save_ip_intel(conn, ip, data)
+                        conn.commit()
+                        log(f"intel {ip}: {data.get('geo', {}).get('country')} {data.get('geo', {}).get('org')} "
+                            f"sources={data['sources']}")
+            except Exception as e:
+                log(f"intel error for {ip}: {e!r}")
+            time.sleep(1.5)  # stay well inside the free APIs' rate limits
 
 
 def db_host_ips(url: str) -> set[str]:
@@ -88,7 +150,8 @@ def db_host_ips(url: str) -> set[str]:
     return ips
 
 
-def flush(conn, sensor_id: int, scorer: Scorer, recs: list[FlowRecord], stats: dict) -> None:
+def flush(conn, sensor_id: int, scorer: Scorer, recs: list[FlowRecord], stats: dict,
+          enricher: Enricher | None = None) -> None:
     if not recs:
         return
     scored = scorer.score(recs)
@@ -98,12 +161,22 @@ def flush(conn, sensor_id: int, scorer: Scorer, recs: list[FlowRecord], stats: d
         if "alert" in rec:
             db.insert_alert(conn, flow_id, rec["alert"])
             n_alert += 1
-            log(f"ALERT {rec['alert']['severity']:6s} {rec['alert']['label']:10s} p={rec['p_attack']:.3f} "
+            if enricher:
+                enricher.submit(rec["alert"]["remote_ip"])
+            log(f"ALERT {rec['alert']['severity']:6s} {rec['alert']['label']:11s} p={rec['p_attack']:.3f} "
                 f"{rec['src_ip']}:{rec['src_port']} -> {rec['dst_ip']}:{rec['dst_port']}/{rec['proto']}")
     stats["flows"] += len(scored)
     db.heartbeat(conn, sensor_id, stats["packets"], stats["flows"])
     conn.commit()
     log(f"scored {len(scored)} flows ({n_alert} alerts); totals packets={stats['packets']} flows={stats['flows']}")
+
+
+def refresh_feeds(url: str, feeds: ThreatFeeds, force: bool = False) -> None:
+    status = feeds.refresh(force=force)
+    with db.connect(url) as c:
+        db.save_feed_status(c, status)
+        c.commit()
+    log("threat feeds: " + ", ".join(f"{k}={v['entries']}{'' if v['ok'] else '(stale)'}" for k, v in status.items()))
 
 
 def main():
@@ -117,10 +190,14 @@ def main():
 
     url = database_url()
     db.init_schema(url)
-    scorer = Scorer()
+    feeds = ThreatFeeds()
+    refresh_feeds(url, feeds, force=True)
+    scorer = Scorer(feeds)
     iface = args.iface or (f"pcap:{args.pcap}" if args.pcap else str(conf.iface))
     table = FlowTable(ignore_ips=db_host_ips(url))
     stats = {"packets": 0, "flows": 0}
+    enricher = Enricher(url, feeds)
+    enricher.start()
     log(f"SafeNet sensor model={scorer.version} iface={iface} ignoring DB hosts {sorted(table.ignore)}")
 
     with db.connect(url) as conn:
@@ -129,7 +206,11 @@ def main():
         if args.pcap:
             sniff(offline=args.pcap, prn=table.on_packet, store=False)
             stats["packets"] = table.packets
-            flush(conn, sensor_id, scorer, table.expire(0, flush_all=True), stats)
+            flush(conn, sensor_id, scorer, table.expire(0, flush_all=True), stats, enricher)
+            deadline = time.time() + 60          # let the intel lookups for these alerts finish
+            while not enricher.q.empty() and time.time() < deadline:
+                time.sleep(0.5)
+            time.sleep(5)
             return
 
         def _stop(*_):
@@ -142,20 +223,24 @@ def main():
         sniffer.start()
         last_prune = 0.0
         errors = 0
-        # When the model bundle or .env (database URL) changes, exit cleanly; launchd
-        # (KeepAlive) restarts the sensor with the new model / database.
-        watched = [MODELS_DIR / "live_bundle.joblib", ROOT / ".env"]
+        # When the model, .env (database URL) or the sensor code changes, exit cleanly;
+        # launchd (KeepAlive) restarts the sensor with the new version.
+        watched = [MODELS_DIR / "live_bundle.joblib", ROOT / ".env", ROOT / "scripts" / "sensor.py",
+                   *sorted((ROOT / "safenet").glob("*.py"))]
         mtimes = {p: p.stat().st_mtime if p.exists() else 0 for p in watched}
         try:
             while not STOP:
                 time.sleep(args.interval)
                 stats["packets"] = table.packets
                 try:
-                    flush(conn, sensor_id, scorer, table.expire(time.time()), stats)
+                    flush(conn, sensor_id, scorer, table.expire(time.time()), stats, enricher)
                     if time.time() - last_prune > 3600:
                         db.prune(conn, keep_days=3)
                         conn.commit()
                         last_prune = time.time()
+                    if time.time() - feeds.loaded_at > feeds.ttl:
+                        threading.Thread(target=refresh_feeds, args=(url, feeds), daemon=True).start()
+                        feeds.loaded_at = time.time()  # avoid starting a second refresh meanwhile
                     errors = 0
                 except Exception as e:  # keep sensing even if one DB write fails
                     errors += 1
@@ -169,12 +254,15 @@ def main():
                         break
                 changed = [p.name for p in watched if (p.stat().st_mtime if p.exists() else 0) != mtimes[p]]
                 if changed:
-                    log(f"{changed} changed; restarting sensor to pick up new model/config")
+                    log(f"{changed} changed; restarting sensor to pick up new model/config/code")
                     break
         finally:
             sniffer.stop()
             stats["packets"] = table.packets
-            flush(conn, sensor_id, scorer, table.expire(time.time(), flush_all=True), stats)
+            try:
+                flush(conn, sensor_id, scorer, table.expire(time.time(), flush_all=True), stats, enricher)
+            except Exception as e:
+                log(f"final flush failed: {e!r}")
             log("sensor stopped")
 
 

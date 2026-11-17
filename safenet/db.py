@@ -76,11 +76,11 @@ def heartbeat(conn, sensor_id: int, packets: int, flows: int) -> None:
 def insert_flow(conn, sensor_id: int, rec: dict[str, Any]) -> int:
     row = conn.execute(
         """insert into safenet.flows(sensor_id, ts_start, ts_end, src_ip, src_port, dst_ip, dst_port, proto,
-                                     features, pred_label, p_attack, ae_score, ae_anomaly, is_alert)
-           values (%s, to_timestamp(%s), to_timestamp(%s), %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) returning id""",
+                                     features, pred_label, p_attack, ae_score, ae_anomaly, is_alert, suppressed)
+           values (%s, to_timestamp(%s), to_timestamp(%s), %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) returning id""",
         (sensor_id, rec["ts_start"], rec["ts_end"], rec["src_ip"], rec["src_port"], rec["dst_ip"], rec["dst_port"],
          rec["proto"], Jsonb(_clean(rec["features"])), rec["pred_label"], rec["p_attack"], rec["ae_score"],
-         rec["ae_anomaly"], rec["is_alert"]),
+         rec["ae_anomaly"], rec["is_alert"], rec.get("suppressed")),
     ).fetchone()
     return row[0]
 
@@ -88,10 +88,39 @@ def insert_flow(conn, sensor_id: int, rec: dict[str, Any]) -> int:
 def insert_alert(conn, flow_id: int, a: dict[str, Any]) -> None:
     conn.execute(
         """insert into safenet.alerts(flow_id, severity, label, p_attack, ae_score, src_ip, dst_ip, dst_port, proto,
-                                      explanation, summary)
-           values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                                      explanation, summary, remote_ip, mitre, intel_hits)
+           values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
         (flow_id, a["severity"], a["label"], a["p_attack"], a["ae_score"], a["src_ip"], a["dst_ip"], a["dst_port"],
-         a["proto"], Jsonb(_clean(a["explanation"])), a["summary"]),
+         a["proto"], Jsonb(_clean(a["explanation"])), a["summary"], a.get("remote_ip"),
+         Jsonb(_clean(a.get("mitre", []))), Jsonb(_clean(a.get("intel_hits", [])))),
+    )
+
+
+def save_feed_status(conn, status: dict[str, dict]) -> None:
+    for key, s in status.items():
+        conn.execute(
+            """insert into safenet.intel_feeds(key, name, url, ok, entries, error, fetched_at, checked_at)
+               values (%s,%s,%s,%s,%s,%s, to_timestamp(%s), now())
+               on conflict (key) do update set name=excluded.name, url=excluded.url, ok=excluded.ok,
+                 entries=excluded.entries, error=excluded.error,
+                 fetched_at=coalesce(excluded.fetched_at, safenet.intel_feeds.fetched_at), checked_at=now()""",
+            (key, s["name"], s["url"], s["ok"], s.get("entries", 0), s.get("error"), s.get("fetched_at")),
+        )
+
+
+def ip_intel_fresh(conn, ip: str, max_age_hours: int = 24) -> bool:
+    row = conn.execute(
+        "select 1 from safenet.ip_intel where ip=%s and fetched_at > now() - make_interval(hours => %s)",
+        (ip, max_age_hours),
+    ).fetchone()
+    return row is not None
+
+
+def save_ip_intel(conn, ip: str, data: dict) -> None:
+    conn.execute(
+        """insert into safenet.ip_intel(ip, data, fetched_at) values (%s,%s,now())
+           on conflict (ip) do update set data=excluded.data, fetched_at=now()""",
+        (ip, Jsonb(_clean(data))),
     )
 
 

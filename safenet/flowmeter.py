@@ -151,7 +151,12 @@ class FlowTable:
             self.packets += 1
             rec = self.flows.get(key)
             if rec is None:
-                rec = FlowRecord(src, sport, dst, dport, proto, ts, ts)
+                # If capture starts mid-conversation the first packet may come from the server
+                # (e.g. 443 -> 54721). Orient the flow client -> server like CICFlowMeter does.
+                if 0 < sport < 1024 <= dport:
+                    rec = FlowRecord(dst, dport, src, sport, proto, ts, ts)
+                else:
+                    rec = FlowRecord(src, sport, dst, dport, proto, ts, ts)
                 self.flows[key] = rec
             fwd = (src == rec.src_ip and sport == rec.src_port)
             for seg in _wire_segments(size, proto, is_v6=IPv6 in pkt and IP not in pkt):

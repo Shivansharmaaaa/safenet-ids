@@ -92,3 +92,33 @@ alter table safenet.feature_importance enable row level security;
 alter table safenet.sensors            enable row level security;
 alter table safenet.flows              enable row level security;
 alter table safenet.alerts             enable row level security;
+
+-- ---------------------------------------------------------------- threat intelligence
+alter table safenet.alerts add column if not exists remote_ip text;
+alter table safenet.alerts add column if not exists mitre jsonb not null default '[]'::jsonb;
+alter table safenet.alerts add column if not exists intel_hits jsonb not null default '[]'::jsonb;
+
+-- status of the downloaded feeds (Feodo Tracker, Spamhaus DROP, CISA KEV)
+create table if not exists safenet.intel_feeds (
+    key         text primary key,
+    name        text not null,
+    url         text not null,
+    ok          boolean not null,
+    entries     integer not null default 0,
+    error       text,
+    fetched_at  timestamptz,
+    checked_at  timestamptz not null default now()
+);
+
+-- cached enrichment of public IPs that raised alerts (ipwho.is, Shodan InternetDB, GreyNoise)
+create table if not exists safenet.ip_intel (
+    ip          text primary key,
+    data        jsonb not null,
+    fetched_at  timestamptz not null default now()
+);
+
+alter table safenet.intel_feeds enable row level security;
+alter table safenet.ip_intel    enable row level security;
+
+-- why a high-scoring flow did not raise an alert (outside the models' training scope)
+alter table safenet.flows add column if not exists suppressed text;

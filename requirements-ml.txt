@@ -8,3 +8,4 @@ torch>=2.3
 shap>=0.46
 scapy>=2.6
 joblib>=1.4
+certifi>=2024.2
