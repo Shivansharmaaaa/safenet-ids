@@ -736,7 +736,9 @@ its benign threshold, or when the remote IP is on a blocklist. Behavioural rules
 detections the per-flow models cannot see: vertical port scans (≥ 25 ports on one host), horizontal sweeps
 (≥ 25 hosts on one port) and brute force (≥ 15 short sessions to SSH/RDP/FTP/SMB/database ports). ICMP and other non-TCP/UDP protocols, and local
 multicast/broadcast discovery (mDNS, SSDP), are outside what the models were trained on: they are still scored
-and stored (marked <i>suppressed</i>) and still checked against the blocklists, but cannot raise an ML alert.</div>
+and stored (marked <i>suppressed</i>) and still checked against the blocklists, but cannot raise an ML alert.
+Unanswered DNS queries are treated the same way: UNSW-NB15 labels 57,276 of them <i>Generic</i> attack and only 55
+normal, so the models learned "no reply = attack", while on real networks unanswered lookups are routine.</div>
 <div class='sn-card'><h4>Privacy</h4>
 Blocklist matching is done locally on the sensor. Only the public IP of an <i>alerted</i> flow is ever sent to the
 enrichment services (cached for 24 h). Captured traffic lives in a private <code>safenet</code> schema with

@@ -140,10 +140,16 @@ def test_out_of_scope_policy():
     t.on_packet(_pkt(IP(src="10.0.0.2", dst="10.0.0.9") / UDP(sport=5353, dport=5353), 1.0))
     for p in tcp_session():
         t.on_packet(p)
+    # DNS: one query left unanswered, one answered
+    t.on_packet(_pkt(IP(src="10.0.0.2", dst="10.0.0.53") / UDP(sport=50001, dport=53) / (b"q" * 28), 1.0))
+    t.on_packet(_pkt(IP(src="10.0.0.2", dst="1.1.1.1") / UDP(sport=50002, dport=53) / (b"q" * 28), 1.0))
+    t.on_packet(_pkt(IP(src="1.1.1.1", dst="10.0.0.2") / UDP(sport=53, dport=50002) / (b"a" * 60), 1.02))
     reasons = {(r.proto, r.dst_ip): out_of_scope(r) for r in t.expire(0, flush_all=True)}
     assert "multicast" in reasons[("udp", "224.0.0.251")]
     assert "icmp" in reasons[("icmp", "10.0.0.1")]
     assert "discovery" in reasons[("udp", "10.0.0.9")]
+    assert "unanswered DNS" in reasons[("udp", "10.0.0.53")]
+    assert reasons[("udp", "1.1.1.1")] is None
     assert reasons[("tcp", "93.184.216.34")] is None
 
 

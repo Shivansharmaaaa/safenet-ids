@@ -86,6 +86,9 @@ server_metadata_url = "https://accounts.google.com/.well-known/openid-configurat
 * TCP traffic: no false alerts across the first ~1,000 live TCP flows.
 * ML false positives seen on protocols absent from both datasets: ICMP, mDNS/SSDP discovery, QUIC and STUN (WebRTC).
   The first three are now out of scope by policy; STUN alerts are kept as an honest record of the generalisation gap.
+* On a second network (172.16.0.0/12), unanswered DNS queries to the local resolver scored 0.93–0.97 "Exploit". The cause is in the
+  training labels: UNSW-NB15 marks 57,276 unanswered DNS flows as *Generic* attack and only 55 as normal. These flows
+  are now out of scope too (still scored, stored and checked against the blocklists).
 * A real TCP connect scan of `scanme.nmap.org` (a host the Nmap project provides for scan testing) scored *benign*
   flow-by-flow (max 0.013): CIC-IDS2017's scans are LAN nmap SYN scans with a different signature. The behavioural
   rule caught it ("192 distinct ports in 60 s", T1046), and enrichment pulled Linode/AS63949, Shodan's 4 open ports
