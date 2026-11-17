@@ -109,6 +109,18 @@ def _wire_segments(size: int, proto: str, is_v6: bool) -> list[int]:
     return [WIRE_MTU] * full + ([rest + hdr] if rest else [])
 
 
+EPHEMERAL_MIN = 32768  # Linux uses 32768-60999, macOS/Windows/IANA 49152-65535 for client ports
+
+
+def _first_packet_is_from_server(sport: int, dport: int, tcp_flags: int | None) -> bool:
+    """Decide the direction of a flow from its first captured packet."""
+    if tcp_flags is not None and tcp_flags & 0x02:      # SYN: the handshake says who is who
+        return bool(tcp_flags & 0x10)                   # SYN-ACK comes from the server
+    if 0 < sport < 1024 <= dport:                       # well-known service port -> high port
+        return True
+    return 0 < sport < EPHEMERAL_MIN <= dport           # e.g. Apple push 5223 -> 57450
+
+
 class FlowTable:
     def __init__(self, ignore_ips: set[str] | None = None):
         self.flows: dict[tuple, FlowRecord] = {}
@@ -130,7 +142,7 @@ class FlowTable:
             return
         if src in self.ignore or dst in self.ignore:
             return
-        win, fin_rst = None, False
+        win, fin_rst, flags = None, False, None
         if TCP in pkt:
             l4, proto = pkt[TCP], "tcp"
             sport, dport = int(l4.sport), int(l4.dport)
@@ -153,7 +165,7 @@ class FlowTable:
             if rec is None:
                 # If capture starts mid-conversation the first packet may come from the server
                 # (e.g. 443 -> 54721). Orient the flow client -> server like CICFlowMeter does.
-                if 0 < sport < 1024 <= dport:
+                if _first_packet_is_from_server(sport, dport, flags):
                     rec = FlowRecord(dst, dport, src, sport, proto, ts, ts)
                 else:
                     rec = FlowRecord(src, sport, dst, dport, proto, ts, ts)

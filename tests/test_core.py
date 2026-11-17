@@ -59,6 +59,20 @@ def test_flowmeter_orients_mid_stream_capture_client_to_server():
     assert rec.bwd_pkts == 1 and rec.fwd_pkts == 1
 
 
+def test_orientation_uses_handshake_and_ephemeral_ports():
+    t = FlowTable()
+    # mid-stream Apple push connection: first packet seen is server 5223 -> client ephemeral port
+    t.on_packet(_pkt(IP(src="17.242.13.4", dst="10.0.0.2") / TCP(sport=5223, dport=57450, flags="PA") / b"z", 1.0))
+    # a SYN from source port 53 (a classic firewall-evasion trick) is still the client
+    t.on_packet(_pkt(IP(src="10.0.0.66", dst="10.0.0.2") / TCP(sport=53, dport=8080, flags="S"), 1.0))
+    # first packet seen is the SYN-ACK: its sender is the server
+    t.on_packet(_pkt(IP(src="10.0.0.9", dst="10.0.0.2") / TCP(sport=40000, dport=41000, flags="SA"), 1.0))
+    recs = {r.dst_port: r for r in t.expire(0, flush_all=True)}
+    assert recs[5223].src_ip == "10.0.0.2" and recs[5223].bwd_pkts == 1
+    assert recs[8080].src_ip == "10.0.0.66" and recs[8080].src_port == 53
+    assert recs[40000].src_ip == "10.0.0.2"
+
+
 def test_tso_super_packets_are_resplit_to_wire_frames():
     assert _wire_segments(800, "tcp", False) == [800]
     segs = _wire_segments(4000, "tcp", False)
@@ -144,12 +158,15 @@ def test_out_of_scope_policy():
     t.on_packet(_pkt(IP(src="10.0.0.2", dst="10.0.0.53") / UDP(sport=50001, dport=53) / (b"q" * 28), 1.0))
     t.on_packet(_pkt(IP(src="10.0.0.2", dst="1.1.1.1") / UDP(sport=50002, dport=53) / (b"q" * 28), 1.0))
     t.on_packet(_pkt(IP(src="1.1.1.1", dst="10.0.0.2") / UDP(sport=53, dport=50002) / (b"a" * 60), 1.02))
+    # QUIC packets from a server whose client side was never captured
+    t.on_packet(_pkt(IP(src="17.253.18.81", dst="10.0.0.2") / UDP(sport=443, dport=61000) / (b"s" * 90), 1.0))
     reasons = {(r.proto, r.dst_ip): out_of_scope(r) for r in t.expire(0, flush_all=True)}
     assert "multicast" in reasons[("udp", "224.0.0.251")]
     assert "icmp" in reasons[("icmp", "10.0.0.1")]
     assert "discovery" in reasons[("udp", "10.0.0.9")]
     assert "unanswered DNS" in reasons[("udp", "10.0.0.53")]
     assert reasons[("udp", "1.1.1.1")] is None
+    assert "one-sided" in reasons[("udp", "17.253.18.81")]
     assert reasons[("tcp", "93.184.216.34")] is None
 
 

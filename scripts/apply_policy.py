@@ -17,7 +17,8 @@ from safenet.config import database_url
 from safenet.policy import out_of_scope
 
 QUERY = """
-select a.id, a.flow_id, f.src_ip, f.src_port, f.dst_ip, f.dst_port, f.proto, (f.features->>'bwd_pkts')::float
+select a.id, a.flow_id, f.src_ip, f.src_port, f.dst_ip, f.dst_port, f.proto,
+       (f.features->>'fwd_pkts')::float, (f.features->>'bwd_pkts')::float
 from safenet.alerts a join safenet.flows f on f.id = a.flow_id
 where a.status = 'open'
   and coalesce(a.explanation->>'detector', 'ml') in ('ml', 'autoencoder')
@@ -31,9 +32,9 @@ def main() -> None:
     args = ap.parse_args()
     with db.connect(database_url()) as conn:
         hits = []
-        for aid, fid, sip, sport, dip, dport, proto, bwd in conn.execute(QUERY).fetchall():
+        for aid, fid, sip, sport, dip, dport, proto, fwd, bwd in conn.execute(QUERY).fetchall():
             reason = out_of_scope(SimpleNamespace(src_ip=sip, src_port=sport, dst_ip=dip, dst_port=dport,
-                                                  proto=proto, bwd_pkts=bwd))
+                                                  proto=proto, fwd_pkts=fwd, bwd_pkts=bwd))
             if reason:
                 hits.append((aid, fid, reason))
         for reason, n in Counter(r for _, _, r in hits).items():

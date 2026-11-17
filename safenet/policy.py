@@ -22,6 +22,9 @@ def out_of_scope(r: FlowRecord) -> str | None:
             return "local multicast/broadcast service discovery"
     except ValueError:
         pass
+    if r.fwd_pkts == 0:
+        # every CIC-IDS2017 / UNSW-NB15 flow starts with a packet from its initiator
+        return "one-sided flow: only the responder's packets were captured"
     if r.proto == "udp" and (r.dst_port in DISCOVERY_PORTS or r.src_port in DISCOVERY_PORTS):
         return "local service discovery (mDNS/LLMNR/SSDP/NetBIOS/WS-Discovery)"
     if r.proto == "udp" and r.dst_port == DNS_PORT and r.bwd_pkts == 0:

@@ -163,10 +163,16 @@ def save_ip_intel(conn, ip: str, data: dict) -> None:
     )
 
 
-def prune(conn, keep_days: int = 14) -> None:
-    """Keep the free-tier database small: drop non-alert flows older than keep_days."""
+def prune(conn, keep_days: int = 14, max_flows: int = 300_000) -> None:
+    """Keep the free-tier database (500 MB) small: drop non-alert flows older than keep_days, and cap the
+    number of non-alert flows (~0.85 kB each with indexes) so a busy network cannot fill the database.
+    Flows behind an alert are always kept."""
     conn.execute(
         "delete from safenet.flows where not is_alert and ts_end < now() - make_interval(days => %s)", (keep_days,)
+    )
+    conn.execute(
+        """delete from safenet.flows where id in (
+               select id from safenet.flows where not is_alert order by id desc offset %s)""", (max_flows,)
     )
 
 

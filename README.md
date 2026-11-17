@@ -14,6 +14,8 @@ the public **CIC-IDS2017** and **UNSW-NB15** datasets and are tested **across** 
                                                          Streamlit dashboard (Google sign-in) ◄┘
 ```
 
+**Performance report** (generalisation, evasion resistance, live findings): [docs/REPORT.md](docs/REPORT.md)
+
 ## What is in the repo
 
 | Path | Purpose |
@@ -30,6 +32,7 @@ the public **CIC-IDS2017** and **UNSW-NB15** datasets and are tested **across** 
 | `tests/` + `.github/workflows/ci.yml` | Unit tests and GitHub Actions CI |
 | `scripts/train.py` | Runs all experiments, saves the live model bundle, and writes results to the database |
 | `scripts/sensor.py` | Live sensor: capture → score → explain → database |
+| `scripts/apply_policy.py` | Re-applies the alert-scope policy to open alerts after a rule change |
 | `streamlit_app.py` | Dashboard: live flows, alerts with SHAP, and the full evaluation report |
 | `sql/schema.sql` | Database schema (own `safenet` schema with RLS on) |
 
@@ -62,7 +65,7 @@ DATABASE_URL=postgresql://postgres.<project-ref>:<password>@aws-0-<region>.poole
 ## Run
 
 ```bash
-.venv/bin/python -m scripts.train                       # ~30-60 min: experiments + live model + DB push
+.venv/bin/python -m scripts.train                       # ~10 min: experiments + live model + DB push
 sudo .venv/bin/python -m scripts.sensor --iface en0     # live capture (root needed for packet capture)
 sudo bash scripts/install_sensor_service.sh             # or: run the sensor permanently via launchd
 .venv/bin/streamlit run streamlit_app.py                # dashboard locally
@@ -89,6 +92,8 @@ server_metadata_url = "https://accounts.google.com/.well-known/openid-configurat
 * On a second network (172.16.0.0/12), unanswered DNS queries to the local resolver scored 0.93–0.97 "Exploit". The cause is in the
   training labels: UNSW-NB15 marks 57,276 unanswered DNS flows as *Generic* attack and only 55 as normal. These flows
   are now out of scope too (still scored, stored and checked against the blocklists).
+* Flows where only the server's packets were captured (QUIC after an idle split) raised low "Anomaly" alerts;
+  one-sided flows are now out of scope, and flow direction comes from the TCP handshake or ephemeral ports.
 * A real TCP connect scan of `scanme.nmap.org` (a host the Nmap project provides for scan testing) scored *benign*
   flow-by-flow (max 0.013): CIC-IDS2017's scans are LAN nmap SYN scans with a different signature. The behavioural
   rule caught it ("192 distinct ports in 60 s", T1046), and enrichment pulled Linode/AS63949, Shodan's 4 open ports
