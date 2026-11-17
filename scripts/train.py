@@ -183,10 +183,13 @@ def main():
 
     # -------------------------------------------------- 1. in-dataset, native features
     log("== 1. in-dataset (native features)")
-    fit_eval_models("cicids2017", c_native.values[c_tr], c_cat[c_tr], c_native.values[c_te], c_cat[c_te],
+    # log1p(clip(x, 0)): monotonic, so trees are unaffected, but the autoencoder needs compressed scales
+    cn, un = to_model_space(c_native.values), to_model_space(u_native.values)
+    fit_eval_models("cicids2017", cn[c_tr], c_cat[c_tr], cn[c_te], c_cat[c_te],
                     c_lab.iloc[c_te], list(c_native.columns), "native", fast)
-    fit_eval_models("unswnb15", u_native.values[u_tr], u_cat[u_tr], u_native.values[u_te], u_cat[u_te],
+    fit_eval_models("unswnb15", un[u_tr], u_cat[u_tr], un[u_te], u_cat[u_te],
                     u_lab.iloc[u_te], list(u_native.columns), "native", fast)
+    del cn, un
 
     # -------------------------------------------------- 2. in-dataset, common features
     log("== 2. in-dataset (common features)")
