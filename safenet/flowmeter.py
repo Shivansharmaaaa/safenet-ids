@@ -91,6 +91,24 @@ class FlowRecord:
         return np.array([feats[k] for k in COMMON_FEATURES], dtype=np.float32)
 
 
+WIRE_MTU = 1500
+
+
+def _wire_segments(size: int, proto: str, is_v6: bool) -> list[int]:
+    """Undo TCP segmentation offload (TSO/GRO).
+
+    A host capture sees TCP "super-packets" (up to 64 KB) that the NIC later splits
+    into MTU-sized frames. CIC-IDS2017 and UNSW-NB15 were recorded on the wire, so
+    re-split oversize TCP segments into the frames that actually crossed the network.
+    """
+    if proto != "tcp" or size <= WIRE_MTU:
+        return [size]
+    hdr = 60 if is_v6 else 40              # IP + TCP headers repeated in every frame
+    payload, per = size - hdr, WIRE_MTU - hdr
+    full, rest = divmod(payload, per)
+    return [WIRE_MTU] * full + ([rest + hdr] if rest else [])
+
+
 class FlowTable:
     def __init__(self, ignore_ips: set[str] | None = None):
         self.flows: dict[tuple, FlowRecord] = {}
@@ -136,7 +154,8 @@ class FlowTable:
                 rec = FlowRecord(src, sport, dst, dport, proto, ts, ts)
                 self.flows[key] = rec
             fwd = (src == rec.src_ip and sport == rec.src_port)
-            rec.add(ts, fwd, size, win, fin_rst)
+            for seg in _wire_segments(size, proto, is_v6=IPv6 in pkt and IP not in pkt):
+                rec.add(ts, fwd, seg, win, fin_rst)
 
     def expire(self, now: float, flush_all: bool = False) -> list[FlowRecord]:
         done = []
