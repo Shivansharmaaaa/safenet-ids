@@ -69,7 +69,7 @@ sudo bash scripts/install_sensor_service.sh             # or: run the sensor per
 ```
 
 ## Dashboard deployment (Streamlit Community Cloud)
-Main file `streamlit_app.py`. Secrets (App → Settings → Secrets):
+Live at **https://safenet-ids.streamlit.app** (Google sign-in, allow-listed accounts only). Main file `streamlit_app.py`. Secrets (App → Settings → Secrets):
 ```toml
 DATABASE_URL = "postgresql://..."
 ALLOWED_EMAILS = "you@gmail.com,other@gmail.com"
