@@ -17,8 +17,9 @@ jobs:
       - name: Install
         run: |
           pip install numpy pandas pyarrow scapy python-dotenv pytest
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
-      - name: Unit tests (flow meter, feature mapping, adversarial, behaviour rules, policy, intel)
+      - name: Unit tests (flow meter, feature mapping, adversarial, behaviour rules, policy, intel, sequences)
         run: python -m pytest -q tests
       - name: Dashboard smoke test (renders and fails safely without a database)
         run: |
@@ -29,3 +30,17 @@ jobs:
           assert any("DATABASE_URL" in e.value for e in at.error), [e.value for e in at.error]
           print("dashboard smoke test ok")
           PY
+
+  sensor-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the Linux sensor image (downloads and checksum-verifies the released models)
+        run: docker build -t safenet-sensor .
+      - name: Both model bundles load inside the image
+        run: |
+          docker run --rm --entrypoint python safenet-sensor -c "
+          from scripts.sensor import Scorer
+          s = Scorer()
+          assert s.seq is not None, 'sequence bundle missing'
+          print('per-flow', s.version, '| sequence', s.seq.version)"

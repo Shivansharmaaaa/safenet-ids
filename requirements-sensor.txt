@@ -1,0 +1,13 @@
+# Live sensor only (any machine that captures traffic). Versions match the ones the released models were
+# trained with, because the model bundles are pickled.
+numpy==2.5.5
+pandas==3.1.1
+scikit-learn==1.9.1
+xgboost==3.4.1
+torch==2.15.0
+shap==0.54.1
+scapy==2.8.0
+joblib==1.6.0
+certifi>=2024.2
+psycopg[binary]==3.3.9
+python-dotenv>=1.0

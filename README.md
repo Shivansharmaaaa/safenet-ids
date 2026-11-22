@@ -7,6 +7,7 @@ the public **CIC-IDS2017** and **UNSW-NB15** datasets and are tested **across** 
 
 ```
  live packets ──► flow meter ──► 22 shared flow features ──► XGBoost (adv.-trained) ──► alert + SHAP
+                                      │                       per-host LSTM (last 16 flows of the same host)
  (scapy, en0)     (5-tuple,        (same definition for      XGBoost attack type        │
                    FIN/RST,         CIC-IDS2017, UNSW-NB15     Autoencoder (anomaly)      ▼
                    timeouts)        and live traffic)                         PostgreSQL (Supabase)
@@ -26,11 +27,15 @@ the public **CIC-IDS2017** and **UNSW-NB15** datasets and are tested **across** 
 | `safenet/adversarial.py` | Realistic evasion attack (pad / slow down / inject dummy packets) and adaptive black-box search |
 | `safenet/explain.py` | SHAP global importance and per-alert explanations |
 | `safenet/flowmeter.py` | Live bidirectional flow meter that produces the same features as training (TSO re-split, client→server orientation) |
+| `safenet/sequence.py` | Per-host LSTM over each host's last 16 flows: step features, window gathering, live `HostHistory`, expected-gradients SHAP |
 | `safenet/behavior.py` | Multi-flow behavioural rules: port scans, host sweeps and brute force over a 60 s window |
 | `safenet/intel.py` | Threat intel: abuse.ch Feodo Tracker, Spamhaus DROP, CISA KEV (matched locally), and ipwho.is / Shodan InternetDB / GreyNoise enrichment for alerted IPs, plus MITRE ATT&CK mapping |
 | `safenet/policy.py` | Alert scope: ICMP and LAN discovery (mDNS/SSDP/NetBIOS…) are scored but cannot raise ML alerts |
 | `tests/` + `.github/workflows/ci.yml` | Unit tests and GitHub Actions CI |
 | `scripts/train.py` | Runs all experiments, saves the live model bundle, and writes results to the database |
+| `scripts/train_sequence.py` | Trains the per-host LSTM and a same-rows XGBoost baseline; in-/cross-dataset, per-category and evasion results |
+| `scripts/fetch_models.py` | Downloads the released model bundles (SHA-256 checked), so new sensors need no training data |
+| `Dockerfile`, `scripts/install_sensor_linux.sh`, `requirements-sensor.txt` | Sensor for Linux hosts, gateways and mirror ports (Docker or systemd); see [docs/DEPLOY.md](docs/DEPLOY.md) |
 | `scripts/sensor.py` | Live sensor: capture → score → explain → database |
 | `scripts/apply_policy.py` | Re-applies the alert-scope policy to open alerts after a rule change |
 | `streamlit_app.py` | Dashboard: live flows, alerts with SHAP, and the full evaluation report |
@@ -43,6 +48,20 @@ the public **CIC-IDS2017** and **UNSW-NB15** datasets and are tested **across** 
 3. **Robustness**: an adaptive attacker searches pad/slow/inject perturbations of up to budget ε on
    the attacker's own packets to evade each model.
 4. **Adversarial training**: XGBoost retrained with perturbed attacks. Clean accuracy is compared and robustness re-measured.
+
+## Per-host sequence model (`scripts/train_sequence.py`)
+Each flow is scored together with the same host's previous 15 flows. Three LSTM variants are compared with an XGBoost
+trained on exactly the same rows: **LSTM** (all features), **LSTM-NoTiming** (the five round-trip-time features
+masked, after the full LSTM missed a real internet scan because it had learned LAN speed), and
+**LSTM-NoTiming-Adv** (masked, plus adversarial training; deployed). Headline numbers, combined training:
+
+| | CIC-IDS2017 F1 | UNSW-NB15 F1 | CIC attacks detected at ε = 2 | Real `scanme.nmap.org` scan, flows flagged | False alarms on the Mac's traffic |
+|---|---|---|---|---|---|
+| LSTM | 0.995 | 0.959 | 44 % | ≈ 0 % | 0.047 % |
+| LSTM-NoTiming | 0.997 | 0.957 | 54 % | 87 % | 0.016 % |
+| **LSTM-NoTiming-Adv** | 0.993 | 0.959 | **98 %** | 78 % (one grouped alert) | **0.013 %** |
+
+Details, per-category results and limitations: [docs/REPORT.md §6](docs/REPORT.md).
 
 ## Setup
 
@@ -57,6 +76,12 @@ Datasets (not committed) go in `data/raw/`:
 * `data/raw/unswnb15/{train,test}.csv`: the official UNSW-NB15 training/testing partitions
   (UNSW Canberra; mirrored at `huggingface.co/datasets/Mireu-Lab/UNSW-NB15`)
 
+The per-host sequence model needs the releases that keep IPs and timestamps:
+* `data/raw/cicids2017_improved/{monday..friday}.csv`: CIC-IDS2017 re-extracted and re-labelled by KU Leuven DistriNet
+  (`intrusion-detection.distrinet-research.be/CNS2022/Datasets/CICIDS2017_improved.zip`)
+* `data/raw/unswnb15_full/UNSW-NB15_{1..4}.csv` + `NUSW-NB15_features.csv`: the full UNSW-NB15 records from UNSW's
+  share linked at `research.unsw.edu.au/projects/unsw-nb15-dataset`
+
 `.env` needs the database connection string (Supabase → Connect → Session pooler):
 ```
 DATABASE_URL=postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres
@@ -66,8 +91,11 @@ DATABASE_URL=postgresql://postgres.<project-ref>:<password>@aws-0-<region>.poole
 
 ```bash
 .venv/bin/python -m scripts.train                       # ~10 min: experiments + live model + DB push
+.venv/bin/python -m scripts.train_sequence              # ~10 min: three LSTM variants + comparison + DB push
 sudo .venv/bin/python -m scripts.sensor --iface en0     # live capture (root needed for packet capture)
 sudo bash scripts/install_sensor_service.sh             # or: run the sensor permanently via launchd
+docker build -t safenet-sensor . && docker run --net=host --cap-add NET_RAW --cap-add NET_ADMIN \
+    -e DATABASE_URL=... safenet-sensor                  # more sensors: Linux hosts, gateways, mirror ports
 .venv/bin/streamlit run streamlit_app.py                # dashboard locally
 ```
 

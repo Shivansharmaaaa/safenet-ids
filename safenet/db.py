@@ -86,9 +86,9 @@ def insert_flow(conn, sensor_id: int, rec: dict[str, Any]) -> int:
 
 
 _FLOW_COLS = ("sensor_id, ts_start, ts_end, src_ip, src_port, dst_ip, dst_port, proto, features, pred_label, "
-              "p_attack, ae_score, ae_anomaly, is_alert, suppressed")
+              "p_attack, ae_score, ae_anomaly, is_alert, suppressed, p_seq")
 _FLOW_ROW = ("(%s::bigint, to_timestamp(%s::float8), to_timestamp(%s::float8), %s::text, %s::int, %s::text, %s::int, "
-             "%s::text, %s::jsonb, %s::text, %s::float8, %s::float8, %s::bool, %s::bool, %s::text)")
+             "%s::text, %s::jsonb, %s::text, %s::float8, %s::float8, %s::bool, %s::bool, %s::text, %s::float8)")
 
 
 def insert_flows(conn, sensor_id: int, recs: list[dict[str, Any]], chunk: int = 500) -> list[int]:
@@ -101,7 +101,7 @@ def insert_flows(conn, sensor_id: int, recs: list[dict[str, Any]], chunk: int = 
         for r in part:
             params += [sensor_id, r["ts_start"], r["ts_end"], r["src_ip"], r["src_port"], r["dst_ip"], r["dst_port"],
                        r["proto"], Jsonb(_clean(r["features"])), r["pred_label"], r["p_attack"], r["ae_score"],
-                       r["ae_anomaly"], r["is_alert"], r.get("suppressed")]
+                       r["ae_anomaly"], r["is_alert"], r.get("suppressed"), r.get("p_seq")]
         # ordinality keeps the RETURNING order identical to the input order
         sql = (f"with v({_FLOW_COLS}, ord) as (values "
                + ",".join(_FLOW_ROW[:-1] + f", {k})" for k in range(len(part)))
@@ -122,6 +122,12 @@ def insert_alerts(conn, items: list[tuple[int, dict[str, Any]]]) -> None:
         "insert into safenet.alerts(flow_id, severity, label, p_attack, ae_score, src_ip, dst_ip, dst_port, proto, "
         "explanation, summary, remote_ip, mitre, intel_hits) values "
         + ",".join(["(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"] * len(items)), params)
+
+
+def update_campaign(conn, flow_id: int, campaign: dict[str, Any]) -> None:
+    """Record how far an LSTM campaign has grown on the alert raised for its first flow."""
+    conn.execute("update safenet.alerts set explanation = explanation || jsonb_build_object('campaign', %s::jsonb) "
+                 "where flow_id = %s", (Jsonb(_clean(campaign)), flow_id))
 
 
 def insert_alert(conn, flow_id: int, a: dict[str, Any]) -> None:

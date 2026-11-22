@@ -15,8 +15,15 @@ Live dashboard: https://safenet-ids.streamlit.app.
 * **Standard models are easy to evade.** An attacker who only pads, slows down or pads out *their own* packets
   cuts XGBoost's detection rate from 99.4 % to 62.7 % (budget ε = 1). Adversarial training keeps it at 97.0 %,
   with no loss of clean accuracy.
+* **Context plus adversarial training makes evasion much harder.** A per-host LSTM that reads each flow together
+  with the same host's previous 15 flows keeps detecting 97 % of UNSW-NB15 attacks at ε = 0.25, where a single-flow
+  XGBoost trained on the same rows falls to 24 %. Trained with adversarial windows, it still detects 98.4 % of
+  CIC-IDS2017 attacks at ε = 2. On UNSW-NB15, large budgets (ε ≥ 1) still defeat it (section 6).
+* **The first LSTM had learned the lab's network speed.** It missed a real internet port scan because scan
+  flows in the datasets are fast LAN round trips. Removing the five timing features fixed this: the deployed LSTM
+  flags 78 % of the real scan's flows (as one grouped alert), with 0.013 % false alarms on the Mac's normal traffic.
 * **Running on real traffic exposed problems no benchmark score shows.** Three alert floods on a real Mac turned out
-  to be artifacts of the datasets or of flow measurement, not attacks (section 6). Each was traced with SHAP and
+  to be artifacts of the datasets or of flow measurement, not attacks (section 7). Each was traced with SHAP and
   the training data, then handled by an explicit, documented scope policy rather than by tuning thresholds.
 
 ## 2. Setup
@@ -89,7 +96,7 @@ Findings:
    XGBoost matches each single-dataset model on its own test set, but UNSW-NB15's FPR stays at 0.30. Data from the
    target network is what matters.
 4. Consequence for deployment: the live detector is the combined, adversarially trained XGBoost, backed by the
-   autoencoder, multi-flow behavioural rules and threat intelligence. Section 6 shows which live alerts can be trusted.
+   autoencoder, multi-flow behavioural rules and threat intelligence. Section 7 shows which live alerts can be trusted.
 
 ## 5. Evasion resistance
 
@@ -118,7 +125,110 @@ test set. The table shows the detection rate at threshold 0.5.
 * The autoencoder starts low and keeps falling: making an attack look more like normal traffic is exactly what an
   anomaly detector can't see.
 
-## 6. Explainability and live operation
+## 6. Per-host sequence model (LSTM)
+
+**Why.** A port scan, a brute-force run or a slow DoS is many flows that each look ordinary. Section 7's
+`scanme.nmap.org` scan scored at most 0.013 flow by flow. A sequence model can see the campaign directly.
+
+**Data.** Per-host sequences need source IPs and start times, which the files used above
+(*MachineLearningCSV*, the official UNSW train/test partitions) drop. The sequence model therefore uses:
+* **CIC-IDS2017 as re-extracted and re-labelled by Engelen et al.** (KU Leuven DistriNet, 2021–2022): 2,099,976 flows
+  with fixed CICFlowMeter bugs and corrected labels. Flows labelled "Attempted" count as benign, as the authors
+  recommend.
+* **The full UNSW-NB15 records** (`UNSW-NB15_1..4.csv`, 2,540,047 flows) from UNSW's own share.
+
+Only TCP/UDP flows enter histories (4.58 M), exactly as on the live sensor.
+
+**Model** (`safenet/sequence.py`). For every flow, the model reads the same host's last 16 flows (zero-padded at the
+start of a host's history). Each step has the 22 shared flow features plus three context features: whole seconds
+since the host's previous flow (UNSW-NB15's time resolution, applied everywhere), whether the destination host
+repeats, and whether the destination port repeats. Then LayerNorm, a 64-unit LSTM, and a head over [last hidden
+state, current flow]. Training: 4 epochs, AdamW, square-root class weights. A unit test checks that the live
+`HostHistory` builds windows identical to the training pipeline. Training is deterministic: a re-run reproduced
+every metric exactly.
+
+Three variants, all trained on the same rows:
+
+* **LSTM**: all 25 step features.
+* **LSTM-NoTiming**: a fixed mask removes the five features that mostly measure network round-trip time (duration,
+  bytes/s, packets/s, forward and backward inter-arrival time). The full LSTM **missed a real internet connect scan**
+  (p ≈ 0.001): setting only `pkts_per_s` of those flows to a CIC-IDS2017 value flipped the score to 0.93. It had
+  learned "a scan is fast because the lab LAN is fast", which does not hold across the internet.
+* **LSTM-NoTiming-Adv** (live): the same mask, trained with adversarial examples. In every batch, half of the attack
+  windows are replaced by a random evasion attempt (budget ε ~ U(0, 2), random padding, slowing and packet
+  injection on every attacker flow, and the gaps before them stretched). This is the perturbation family of section 5,
+  sampled at random rather than chosen adaptively.
+
+**Split.** Random 10-minute time buckets: 70 % train, 10 % validation, 20 % test. **The single-flow baseline is
+XGBoost on the same 22 features and exactly the same rows**, so differences come from the host context alone.
+
+| Train → test | LSTM | LSTM-NoTiming | **LSTM-NoTiming-Adv** | XGBoost (single flow) |
+|---|---|---|---|---|
+| CIC → CIC | **0.997** | 0.994 | 0.996 | 0.988 |
+| UNSW → UNSW | 0.953 | 0.955 | 0.958 | **0.966** |
+| CIC → UNSW | **0.225** | 0.022 | 0.082 | 0.038 |
+| UNSW → CIC | 0.051 | **0.544** | 0.007 | 0.222 |
+| both → CIC | 0.995 | **0.997** | 0.993 | 0.987 |
+| both → UNSW | **0.959** | 0.957 | **0.959** | **0.968** |
+
+F1 at threshold 0.5. False-positive rates in-dataset: CIC 0.03 / 0.05 / 0.07 / 0.00 %, UNSW 1.28 / 1.22 / **0.43** /
+0.74 % (same column order). Per-category detection, precision, recall and ROC-AUC are in
+[`sequence_results.json`](../artifacts/reports/sequence_results.json) and the dashboard's *Model lab → LSTM* tab.
+
+* **In-dataset, host context helps on repetitive attacks.** DoS (99.0–99.9 % vs 96.5 % on CIC) and scans on
+  UNSW-NB15 (99.7 % vs 95.1 %). It hurts where one attack flow hides among a host's mostly normal flows: Botnet C2
+  beacons (26–69 % vs 99 %) and the six CIC Exploit flows (Infiltration, Heartbleed). These are left to the per-flow
+  models, which run alongside.
+* **Adversarial training cost almost nothing in clean accuracy** and cut UNSW-NB15 false alarms by two thirds
+  (1.22 % → 0.43 %), at a cost in UNSW scan recall (99.4 % → 81.7 % in-dataset; 92.5 % when trained on both).
+* **Cross-dataset results are unstable, not a strength of any variant.** Each variant wins one direction and loses
+  the other, and the masked model's 0.54 (UNSW → CIC) fell to 0.007 once adversarial examples were added. Host
+  context doesn't close the gap between testbeds.
+
+**Evasion** (adaptive black-box, combined models, 8,000 attack windows per dataset). The attacker controls
+*all* their flows in the window: padding, slowing, injecting, *and* spacing the flows further apart. The
+single-flow XGBoost here is **not** adversarially trained, so the first rows compare architectures.
+
+| Test set | Model | ε = 0 | 0.25 | 0.5 | 1.0 | 2.0 |
+|---|---|---|---|---|---|---|
+| CIC-IDS2017 | LSTM | 99.1 % | 97.8 % | 97.4 % | 94.7 % | 44.3 % |
+| CIC-IDS2017 | LSTM-NoTiming | 99.5 % | 97.7 % | 87.5 % | 84.4 % | 54.2 % |
+| CIC-IDS2017 | **LSTM-NoTiming-Adv** | 98.8 % | **98.8 %** | **98.8 %** | **98.7 %** | **98.4 %** |
+| CIC-IDS2017 | XGBoost | 97.4 % | 96.1 % | 90.3 % | 71.6 % | 61.5 % |
+| UNSW-NB15 | LSTM | 97.8 % | 97.0 % | 89.8 % | 37.6 % | **32.3 %** |
+| UNSW-NB15 | LSTM-NoTiming | 98.6 % | 98.4 % | 98.0 % | 35.9 % | 24.8 % |
+| UNSW-NB15 | **LSTM-NoTiming-Adv** | 97.2 % | 96.9 % | 96.6 % | 37.1 % | 30.5 % |
+| UNSW-NB15 | XGBoost | 98.1 % | 23.5 % | 12.0 % | 6.9 % | 5.2 % |
+
+* On CIC-IDS2017, adversarial training makes the LSTM practically insensitive to this attacker: 98.4 % of attacks
+  are still detected at ε = 2, against 54 % without it.
+* On UNSW-NB15 it does not help at ε ≥ 1. Large padding and injection move UNSW attack flows into the range of UNSW's
+  own benign traffic, so no decision boundary separates them with these features. A random (not adaptive) training
+  attacker is also weaker than the evaluation attacker; adaptive adversarial training is the next step.
+
+**Live.** The sensor keeps a 16-flow history per source host and scores every TCP/UDP flow with the LSTM
+(`flows.p_seq`). A flow raises a *sequence* alert when the LSTM scores it ≥ 0.90 and the per-flow models did not
+already alert. The same scope policy applies. **A host's sequence alerts within 10 minutes of each other form one
+campaign** (at most 1 h): the first flow raises the alert, later flows are flagged and folded into it, and the alert
+records the campaign's size, ports and hosts. Each sequence alert stores expected-gradients SHAP values
+(`shap.GradientExplainer`), summed per feature and per earlier flow, so the console shows *which of the host's
+recent flows* pushed the score.
+
+**Live check** (2026-11-22, the Mac's sensor; replay of all 74,549 stored TCP/UDP flows, plus two fresh 50-port
+connect scans of `scanme.nmap.org`):
+
+| Model | Scan flows ≥ 0.90 | Normal in-scope flows ≥ 0.90 (n = 61,075) | ≥ 0.5 |
+|---|---|---|---|
+| LSTM (first deployment) | ≈ 0 % (p ≈ 0.001) | 27 of 57,814 earlier flows | 0.41 % |
+| LSTM-NoTiming | 87.3 % | 10 (0.016 %) | 0.15 % |
+| **LSTM-NoTiming-Adv** | 78.4 % | **8 (0.013 %)** | **0.04 %** |
+
+Live, the second scan produced **one** LSTM alert covering 46 flows and 45 ports (peak score 0.999997), next to the
+behavioural rule's alert. Before grouping, the same scan produced 43 separate alerts. The per-flow XGBoost scored
+those flows 0.00. The few normal flows that do cross 0.90 mostly come right after a scan, while the scan's flows are
+still inside the host's 16-flow window; grouping folds them into the scan's campaign.
+
+## 7. Explainability and live operation
 
 Every ML and threat-intel alert stores a SHAP waterfall: the features that pushed this flow toward "attack" or
 "benign". The live detector's most important features globally are byte ratio, backward packet size and the TCP
@@ -138,6 +248,8 @@ What running on real traffic exposed, and what was done about it:
 | 14 low "Anomaly" alerts on QUIC | Flows where only the server's packets were captured (mid-stream or idle split); every dataset flow starts with a packet from the initiator | One-sided flows out of scope |
 | An Apple push connection (port 5223) treated as an attack *from* Apple | Direction guessed wrongly on a mid-stream capture (only ports < 1024 were treated as server ports) | Direction now from the TCP handshake, or else the client's temporary port (≥ 32768) |
 | A real connect scan of `scanme.nmap.org` scored benign flow by flow (max 0.013) | CIC-IDS2017's scans are LAN SYN scans with a different signature | Behavioural rule caught it: 192 ports in 60 s, ATT&CK T1046 |
+| The first per-host LSTM also missed the scan (p ≈ 0.001) | It had learned LAN round-trip time (packet rate) as the scan signature | LSTM retrained without timing features: flags 78 % of the scan's flows as one campaign alert (section 6) |
+| One scan raised 43 separate LSTM alerts | Every flow of a campaign crosses the threshold | A host's sequence alerts within 10 min are grouped into one alert with campaign evidence |
 | STUN/WebRTC (UDP 3478) flows scored 0.91–0.99 "Exploit" | WebRTC traffic is absent from both datasets | **Deliberately left visible** as a record of the generalisation gap |
 | Long HTTP connections with no server reply (port 80) scored "DoS" | Looks like the slowloris / slowhttptest pattern in CIC-IDS2017 | Left as alerts. The behaviour really does match; an analyst has to decide |
 
@@ -145,23 +257,26 @@ Every scope rule keeps the flow scored, stored, labelled with its reason and che
 nothing is hidden. `scripts/apply_policy.py` re-applies the current policy to open alerts after a rule change. They
 are marked resolved, not deleted.
 
-## 7. Limitations and future work
+## 8. Limitations and future work
 
 * **Datasets are old testbeds.** CIC-IDS2017 and UNSW-NB15 come from 2017 and 2015 lab networks, before QUIC and
-  modern WebRTC were common. Section 6 shows the consequence directly. Labelled flows from the deployment network
+  modern WebRTC were common. Section 7 shows the consequence directly. Labelled flows from the deployment network
   would help more than any model change.
 * **Per-flow models can't see campaigns.** Scans and brute force spread over many short flows. The behavioural rules
   cover them, but they are hand-set thresholds (25 ports, 25 hosts, 15 sessions in 60 s).
-* **No sequence model.** The spec's "LSTM/Autoencoder" option is covered by the autoencoder. A sequence model over
-  each host's flows is the natural next step for catching slow multi-flow attacks.
-* **Robustness is measured against one attack family** (section 5). White-box and feature-space-agnostic attacks
+* **The sequence model's adversarial training uses a random, not adaptive, attacker** and does not hold on
+  UNSW-NB15 at ε ≥ 1 (section 6). Botnet beacons and rare single-flow exploits are better left to the per-flow
+  models.
+* **Robustness is measured against one attack family** (sections 5 and 6). White-box and feature-space-agnostic attacks
   were not evaluated.
-* **One sensor on one host.** It sees the Mac's own traffic, not a whole network segment, so lateral movement between
-  other hosts is invisible.
+* **Coverage depends on where sensors sit.** A sensor sees only its own interface; on Wi-Fi that is the host's own
+  traffic. SafeNet supports any number of sensors (macOS, Linux systemd, Docker) reporting to one console, but
+  watching a whole segment needs one on the gateway or a switch mirror port ([DEPLOY.md](DEPLOY.md)).
 
-## 8. Reproducing
+## 9. Reproducing
 
 ```bash
 .venv/bin/python -m scripts.train          # all experiments, live model bundle, DB push (545 s for the last full run on this Mac)
-.venv/bin/python -m pytest -q tests        # flow meter, dataset mappings, perturbations, rules, policy
+.venv/bin/python -m scripts.train_sequence # three LSTM variants vs XGBoost, cross-dataset, evasion (604 s on this Mac)
+.venv/bin/python -m pytest -q tests        # flow meter, dataset mappings, perturbations, rules, policy, sequences
 ```

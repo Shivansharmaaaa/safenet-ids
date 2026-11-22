@@ -26,19 +26,20 @@ MTU = 1500.0
 
 
 def perturb(X: pd.DataFrame, pad: float = 0.0, slow: float = 0.0, inject: float = 0.0) -> pd.DataFrame:
+    """pad / slow / inject are budgets: scalars, or one value per row."""
     P = X.copy()
-    if pad:
+    if np.any(pad):
         new_mean = np.minimum(P["fwd_pkt_mean"] * (1 + pad), MTU)
         new_mean = np.maximum(new_mean, P["fwd_pkt_mean"])
         P["fwd_pkt_mean"] = new_mean
         P["fwd_bytes"] = new_mean * P["fwd_pkts"]
-    if inject:
+    if np.any(inject):
         extra = np.ceil(P["fwd_pkts"] * inject)
         P["fwd_bytes"] = P["fwd_bytes"] + 60.0 * extra
         P["fwd_pkts"] = P["fwd_pkts"] + extra
         P["fwd_pkt_mean"] = P["fwd_bytes"] / P["fwd_pkts"].clip(lower=1)
         P["fwd_iat_ms"] = np.where(P["fwd_pkts"] > 1, P["duration_s"] * 1000.0 / (P["fwd_pkts"] - 1), P["fwd_iat_ms"])
-    if slow:
+    if np.any(slow):
         P["duration_s"] = P["duration_s"] * (1 + slow)
         P["fwd_iat_ms"] = P["fwd_iat_ms"] * (1 + slow)
         P["bwd_iat_ms"] = P["bwd_iat_ms"] * (1 + slow)

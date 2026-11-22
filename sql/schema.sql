@@ -122,3 +122,6 @@ alter table safenet.ip_intel    enable row level security;
 
 -- why a high-scoring flow did not raise an alert (outside the models' training scope)
 alter table safenet.flows add column if not exists suppressed text;
+
+-- LSTM score of the flow in the context of its host's previous flows (null when no sequence model is loaded)
+alter table safenet.flows add column if not exists p_seq double precision;

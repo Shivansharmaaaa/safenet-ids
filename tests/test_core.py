@@ -185,3 +185,67 @@ def test_remote_ip_and_mitre():
     assert remote_ip("10.0.0.2", "10.0.0.3") is None
     assert [m["id"] for m in mitre_for("Scan")] == ["T1046", "T1595"]
     assert mitre_for("Anomaly") == []
+
+
+# ------------------------------------------------------------------ per-host sequence model
+def _seq_flows():
+    rng = np.random.default_rng(1)
+    rows = []
+    for host, n in (("10.0.0.2", 5), ("10.0.0.3", 3)):
+        for k in range(n):
+            rows.append(dict(host=host, ts=1000.0 + 2.6 * k + (0.3 if host == "10.0.0.3" else 0.0),
+                             dst="93.184.216.34" if k % 2 else "1.1.1.1", dport=443 if k < 3 else 22,
+                             **{c: float(rng.integers(0, 3000)) for c in COMMON_FEATURES}))
+    return pd.DataFrame(rows)
+
+
+def test_sequence_windows_match_between_training_and_live():
+    from safenet import sequence as sq
+    df = _seq_flows()                       # already sorted by (host, ts)
+    steps = sq.step_matrix(df, df.host.values, df.ts.values, df.dst.values, df.dport.values)
+    start = sq.host_starts(df.host.values)
+    win_train = sq.gather(steps, start, np.arange(len(df)))
+    hist = sq.HostHistory()
+    for i, r in df.iterrows():
+        win_live, metas = hist.push(r.host, r.ts, r.dst, r.dport, r[COMMON_FEATURES].values.astype(np.float32), {"i": i})
+        np.testing.assert_allclose(win_live, win_train[i], rtol=1e-5, atol=1e-5)
+    present = sq.STEP_FEATURES.index("present")
+    assert win_train[2][:, present].tolist()[-4:] == [0, 1, 1, 1]          # 3rd flow of host A: 3 steps present
+    assert win_train[5][:, present].sum() == 1                             # 1st flow of host B: no context leaks in
+    gap = sq.STEP_FEATURES.index("gap_s")
+    assert np.expm1(win_train[1][-1, gap]) == pytest.approx(2.0)           # floor(1002.6) - floor(1000.0) whole seconds
+
+
+def test_sequence_lstm_forward():
+    import torch
+    from safenet import sequence as sq
+    m = sq.SeqLSTM()
+    out = m(torch.zeros(4, sq.SEQ_LEN, len(sq.STEP_FEATURES)))
+    assert out.shape == (4,)
+
+
+def test_lstm_alerts_from_one_host_are_grouped_into_one_campaign():
+    from types import SimpleNamespace
+    from scripts.sensor import CAMPAIGN_GAP_S, Scorer
+    t = FlowTable()
+    for i, port in enumerate(range(1, 31)):
+        ts = 500.0 + i * 0.05
+        t.on_packet(_pkt(IP(src="10.0.0.2", dst="45.33.32.156") / TCP(sport=41000 + i, dport=port, flags="S"), ts))
+        t.on_packet(_pkt(IP(src="45.33.32.156", dst="10.0.0.2") / TCP(sport=port, dport=41000 + i, flags="RA"), ts + .1))
+    recs = sorted(t.expire(0, flush_all=True), key=lambda r: r.first_ts)
+    s = object.__new__(Scorer)                                  # no model files needed: stub the LSTM
+    s.campaigns = {}
+    s.seq = SimpleNamespace(thr=0.9, score=lambda rs, p: {i: (0.99, None, []) for i in range(len(rs))},
+                            explainer=SimpleNamespace(explain=lambda w, m: {"detector": "sequence", "context_flows": 15,
+                                                                             "contributions": []}))
+    out = [dict(p_attack=0.0, is_alert=False) for _ in recs]
+    s._sequence(recs, out, ["Scan"] * len(recs), np.zeros(len(recs)))
+    assert sum("alert" in o for o in out) == 1 and all(o["is_alert"] for o in out)
+    (fid, camp), = Scorer.campaign_updates(list(range(100, 100 + len(out))), out)
+    assert fid == 100 and camp["flows"] == 30 and camp["distinct_ports"] == 30 and camp["distinct_hosts"] == 1
+    # the same host much later is a new incident
+    late = recs[0]
+    late.first_ts += CAMPAIGN_GAP_S + 1
+    out2 = [dict(p_attack=0.0, is_alert=False)]
+    s._sequence([late], out2, ["Scan"], np.zeros(1))
+    assert "alert" in out2[0]

@@ -90,8 +90,11 @@ FEATURE_LABELS = {
     "byte_ratio": "Response/request byte ratio", "svc_http": "HTTP service", "svc_tls": "TLS/HTTPS service",
     "svc_dns": "DNS service", "svc_ssh": "SSH service", "svc_ftp": "FTP service", "svc_mail": "Mail service",
     "svc_other": "Other service",
+    "gap_s": "Gap since host's previous flow (s)", "same_dst": "Same destination as previous flow",
+    "same_dport": "Same destination port as previous flow",
 }
 DS = {"cicids2017": "CIC-IDS2017", "unswnb15": "UNSW-NB15", "combined": "Both"}
+SEQ_COLORS = {"LSTM": "#22D3EE", "LSTM-NoTiming": "#10B981", "LSTM-NoTiming-Adv": "#F59E0B", "XGBoost": "#818CF8"}
 
 
 # ============================================================================ auth (Google OIDC)
@@ -170,46 +173,73 @@ def execute(sql: str, params: tuple = ()) -> None:
     _conn().execute(sql, params)
 
 
-@st.cache_data(ttl=10, show_spinner=False)
-def d_sensor():
-    return q("select hostname, interface, model_version, started_at, last_seen, packets_seen, flows_scored "
-             "from safenet.sensors order by last_seen desc limit 1")
+ONLINE_S = 90  # a sensor heartbeats every few seconds; silent for longer = offline
 
 
 @st.cache_data(ttl=10, show_spinner=False)
-def d_kpis():
-    return q("""select
-      (select count(*) from safenet.flows where ts_end > now() - interval '24 hours') flows_24h,
-      (select count(*) from safenet.flows where ts_end > now() - interval '1 hour') flows_1h,
-      (select count(*) from safenet.alerts where created_at > now() - interval '24 hours') alerts_24h,
-      (select count(*) from safenet.alerts where status = 'open') open_alerts,
-      (select count(*) from safenet.alerts where label = 'ThreatIntel' and created_at > now() - interval '7 days') intel_7d,
-      (select count(*) from safenet.flows where suppressed is not null and ts_end > now() - interval '24 hours') suppressed_24h,
-      (select count(distinct dst_ip) from safenet.flows where ts_end > now() - interval '24 hours') dests_24h""").iloc[0]
+def d_sensors():
+    return q("""select s.id, s.hostname, s.interface, s.model_version, s.started_at, s.last_seen, s.packets_seen,
+                       s.flows_scored,
+                       (select count(*) from safenet.flows f where f.sensor_id = s.id
+                          and f.ts_end > now() - interval '24 hours') flows_24h,
+                       (select count(*) from safenet.alerts a join safenet.flows f on f.id = a.flow_id
+                          where f.sensor_id = s.id and a.created_at > now() - interval '24 hours') alerts_24h
+                from safenet.sensors s order by s.last_seen desc""")
+
+
+def online(last_seen) -> bool:
+    return (datetime.now(timezone.utc) - pd.Timestamp(last_seen).to_pydatetime()).total_seconds() < ONLINE_S
+
+
+def sid() -> int | None:
+    """Sensor selected in the sidebar (None = all sensors)."""
+    return st.session_state.get("sensor_id")
 
 
 @st.cache_data(ttl=10, show_spinner=False)
-def d_timeline(hours: int):
+def d_kpis(sensor: int | None):
+    f = "(%(s)s::bigint is null or sensor_id = %(s)s)"
+    a = "(%(s)s::bigint is null or exists (select 1 from safenet.flows f where f.id = a.flow_id and f.sensor_id = %(s)s))"
+    return q(f"""select
+      (select count(*) from safenet.flows where ts_end > now() - interval '24 hours' and {f}) flows_24h,
+      (select count(*) from safenet.flows where ts_end > now() - interval '1 hour' and {f}) flows_1h,
+      (select count(*) from safenet.alerts a where created_at > now() - interval '24 hours' and {a}) alerts_24h,
+      (select count(*) from safenet.alerts a where status = 'open' and {a}) open_alerts,
+      (select count(*) from safenet.alerts a where label = 'ThreatIntel' and created_at > now() - interval '7 days' and {a}) intel_7d,
+      (select count(*) from safenet.flows where suppressed is not null and ts_end > now() - interval '24 hours' and {f}) suppressed_24h,
+      (select count(distinct dst_ip) from safenet.flows where ts_end > now() - interval '24 hours' and {f}) dests_24h""",
+             {"s": sensor}).iloc[0]
+
+
+@st.cache_data(ttl=10, show_spinner=False)
+def d_timeline(hours: int, sensor: int | None):
     return q("""select date_trunc('minute', ts_end) as t, count(*) flows, sum(is_alert::int) alerts,
                        sum((features->>'fwd_bytes')::float + (features->>'bwd_bytes')::float) bytes
-                from safenet.flows where ts_end > now() - make_interval(hours => %s) group by 1 order by 1""", (hours,))
+                from safenet.flows where ts_end > now() - make_interval(hours => %(h)s)
+                  and (%(s)s::bigint is null or sensor_id = %(s)s) group by 1 order by 1""", {"h": hours, "s": sensor})
 
 
 @st.cache_data(ttl=10, show_spinner=False)
-def d_flows(limit: int = 1000):
-    return q("""select ts_end, src_ip, src_port, dst_ip, dst_port, proto, pred_label, p_attack, ae_score, ae_anomaly,
-                       is_alert, suppressed, (features->>'fwd_bytes')::float + (features->>'bwd_bytes')::float as bytes,
-                       (features->>'fwd_pkts')::float + (features->>'bwd_pkts')::float as packets,
-                       (features->>'duration_s')::float as duration_s
-                from safenet.flows order by ts_end desc limit %s""", (limit,))
+def d_flows(limit: int, sensor: int | None):
+    return q("""select f.ts_end, s.hostname as sensor, f.src_ip, f.src_port, f.dst_ip, f.dst_port, f.proto, f.pred_label,
+                       f.p_attack, f.p_seq, f.ae_score, f.ae_anomaly, f.is_alert, f.suppressed,
+                       (f.features->>'fwd_bytes')::float + (f.features->>'bwd_bytes')::float as bytes,
+                       (f.features->>'fwd_pkts')::float + (f.features->>'bwd_pkts')::float as packets,
+                       (f.features->>'duration_s')::float as duration_s
+                from safenet.flows f left join safenet.sensors s on s.id = f.sensor_id
+                where (%(s)s::bigint is null or f.sensor_id = %(s)s)
+                order by f.ts_end desc limit %(n)s""", {"n": limit, "s": sensor})
 
 
 @st.cache_data(ttl=10, show_spinner=False)
-def d_alerts(limit: int = 500):
+def d_alerts(limit: int, sensor: int | None):
     return q("""select a.id, a.created_at, a.severity, a.label, a.p_attack, a.ae_score, a.src_ip, a.dst_ip, a.dst_port,
-                       a.proto, a.summary, a.explanation, a.status, a.remote_ip, a.mitre, a.intel_hits, f.features
+                       a.proto, a.summary, a.explanation, a.status, a.remote_ip, a.mitre, a.intel_hits, f.features,
+                       s.hostname as sensor
                 from safenet.alerts a left join safenet.flows f on f.id = a.flow_id
-                order by a.created_at desc limit %s""", (limit,))
+                left join safenet.sensors s on s.id = f.sensor_id
+                where (%(s)s::bigint is null or f.sensor_id = %(s)s)
+                order by a.created_at desc limit %(n)s""", {"n": limit, "s": sensor})
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -287,17 +317,23 @@ def is_public(ip: str) -> bool:
 
 
 def header(title: str, subtitle: str):
-    s = d_sensor()
+    s = d_sensors()
+    if sid() is not None:
+        s = s[s["id"] == sid()]
     if s.empty:
         pill = "<span class='sn-pill'><span class='sn-dot off'></span>No sensor yet</span>"
-    else:
+    elif len(s) == 1:
         r = s.iloc[0]
-        online = (datetime.now(timezone.utc) - pd.Timestamp(r["last_seen"]).to_pydatetime()).total_seconds() < 90
-        dot = "on" if online else "off"
-        state = "Sensor online" if online else f"Sensor offline · {ago(r['last_seen'])}"
-        pill = (f"<span class='sn-pill'><span class='sn-dot {dot}'></span>{state}</span>"
+        on = online(r["last_seen"])
+        state = "Sensor online" if on else f"Sensor offline · {ago(r['last_seen'])}"
+        pill = (f"<span class='sn-pill'><span class='sn-dot {'on' if on else 'off'}'></span>{state}</span>"
                 f"<span class='sn-pill mono'>{r['hostname']} · {r['interface']}</span>"
                 f"<span class='sn-pill mono'>model {r['model_version']}</span>")
+    else:
+        n_on = int(s["last_seen"].map(online).sum())
+        pill = (f"<span class='sn-pill'><span class='sn-dot {'on' if n_on else 'off'}'></span>"
+                f"{n_on} of {len(s)} sensors online</span>"
+                f"<span class='sn-pill mono'>model {s.iloc[0]['model_version']}</span>")
     st.markdown(f"<div class='sn-top'><div class='sn-brand'>{SHIELD}<div><div class='t'>{title}</div>"
                 f"<div class='s'>{subtitle}</div></div></div><div style='display:flex;gap:8px;flex-wrap:wrap'>{pill}</div></div>",
                 unsafe_allow_html=True)
@@ -322,18 +358,19 @@ def page_overview():
 
     @st.fragment(run_every=10)
     def live():
-        k = d_kpis()
-        s = d_sensor()
-        pk = int(s.iloc[0]["packets_seen"]) if not s.empty else 0
+        k = d_kpis(sid())
+        s = d_sensors()
+        s = s[s["id"] == sid()] if sid() is not None else s[s["last_seen"].map(online)]
+        pk = int(s["packets_seen"].sum()) if not s.empty else 0
         c = st.columns(6)
         kpi(c[0], "Flows · 24h", fmt_n(k.flows_24h), f"{fmt_n(k.flows_1h)} in the last hour", "accent")
-        kpi(c[1], "Packets this session", fmt_n(pk), "captured on the wire", "violet")
+        kpi(c[1], "Packets this session", fmt_n(pk), f"captured by {len(s)} sensor{'s' if len(s) != 1 else ''}", "violet")
         kpi(c[2], "Alerts · 24h", f"{int(k.alerts_24h):,}", "ML + threat intel", "high" if k.alerts_24h else "ok")
         kpi(c[3], "Open alerts", f"{int(k.open_alerts):,}", "awaiting triage", "medium" if k.open_alerts else "ok")
         kpi(c[4], "Threat-intel hits · 7d", f"{int(k.intel_7d):,}", "Feodo / Spamhaus matches", "high" if k.intel_7d else "ok")
         kpi(c[5], "Destinations · 24h", f"{int(k.dests_24h):,}", f"{int(k.suppressed_24h)} out-of-scope suppressed", "accent")
 
-        tl = d_timeline(3)
+        tl = d_timeline(3, sid())
         left, right = st.columns([2.2, 1])
         with left:
             if tl.empty:
@@ -348,7 +385,7 @@ def page_overview():
                                          marker=dict(color=C["high"], size=9, line=dict(color="#fff", width=1))))
                 st.plotly_chart(fig_style(fig.update_layout(title="Traffic · last 3 hours (UTC)"), 300), width="stretch")
         with right:
-            fl = d_flows(1500)
+            fl = d_flows(1500, sid())
             if not fl.empty:
                 mix = fl.groupby("proto").size().reset_index(name="n")
                 fig = px.pie(mix, names="proto", values="n", hole=.62, title="Protocol mix (recent)")
@@ -358,7 +395,7 @@ def page_overview():
         left, right = st.columns([1.4, 1])
         with left:
             section("Latest alerts")
-            al = d_alerts(8)
+            al = d_alerts(8, sid())
             if al.empty:
                 st.markdown(f"<div class='sn-card'>✅ No alerts. Every flow scored so far looks benign to the models "
                             f"and no contacted IP is on the Feodo Tracker or Spamhaus DROP blocklists.</div>",
@@ -367,7 +404,7 @@ def page_overview():
                 st.markdown("".join(alert_card(r) for _, r in al.iterrows()), unsafe_allow_html=True)
         with right:
             section("Top remote endpoints (recent flows)")
-            fl = d_flows(1500)
+            fl = d_flows(1500, sid())
             if not fl.empty:
                 fl = fl.assign(remote=fl.apply(lambda r: r.dst_ip if is_public(r.dst_ip) else (
                     r.src_ip if is_public(r.src_ip) else None), axis=1)).dropna(subset=["remote"])
@@ -388,7 +425,7 @@ def page_traffic():
 
     @st.fragment(run_every=10)
     def body():
-        fl = d_flows(2000)
+        fl = d_flows(2000, sid())
         if fl.empty:
             st.info("No flows yet.")
             return
@@ -409,6 +446,7 @@ def page_traffic():
         st.dataframe(v, hide_index=True, width="stretch", height=430, column_config={
             "ts_end": st.column_config.DatetimeColumn("Time (UTC)", format="HH:mm:ss"),
             "p_attack": st.column_config.ProgressColumn("Attack score", min_value=0, max_value=1, format="%.4f"),
+            "p_seq": st.column_config.ProgressColumn("LSTM sequence score", min_value=0, max_value=1, format="%.4f"),
             "ae_score": st.column_config.NumberColumn("AE error", format="%.3f"),
             "bytes": st.column_config.NumberColumn("Bytes", format="compact"),
             "packets": st.column_config.NumberColumn("Pkts", format="%d"),
@@ -468,7 +506,7 @@ def ip_intel_panel(ip: str | None):
 
 def page_alerts():
     header("Alert triage", "Explainable detections with SHAP, MITRE ATT&CK and threat intelligence")
-    al = d_alerts(500)
+    al = d_alerts(500, sid())
     if al.empty:
         st.markdown("<div class='sn-card'><h4>No alerts yet</h4>The sensor raises an alert when the adversarially "
                     "trained XGBoost scores a TCP/UDP flow ≥ 0.90, when the autoencoder reconstruction error is "
@@ -511,6 +549,12 @@ def page_alerts():
             m1.metric("Detector", "Behavioural rule")
             m2.metric(key.replace("_", " ").capitalize(), f"{val}", help=f"threshold {evd.get('threshold')} in "
                                                                            f"{int(evd.get('window_s', 60))} s")
+        elif ex.get("detector") == "sequence":
+            m1.metric("LSTM sequence probability", f"{ex.get('p_seq', float('nan')):.3f}",
+                      help="the flow scored in the context of the same host's previous flows")
+            m2.metric("Single-flow XGBoost", f"{a['p_attack']:.3f}", help="the same flow scored on its own")
+            if ex.get("campaign"):
+                m1.caption(f"campaign: {ex['campaign']['flows']} flows")
         else:
             m1.metric("XGBoost attack probability", f"{a['p_attack']:.3f}")
             m2.metric("Autoencoder error", f"{a['ae_score']:.3f}",
@@ -530,6 +574,29 @@ def page_alerts():
                              hide_index=True, width="stretch")
                 if samples:
                     st.markdown("".join(f"<span class='sn-chip mono'>{x}</span>" for x in samples), unsafe_allow_html=True)
+            if expl.get("detector") == "sequence":
+                st.markdown(f"<div class='sn-card'><h4>Sequence model · LSTM over {a['src_ip']}'s last "
+                            f"{expl.get('context_flows')} flows</h4>The per-host LSTM reads each flow together with "
+                            f"the same host's previous flows (gaps, repeated destinations and ports), so it can see "
+                            f"campaigns that look harmless one flow at a time. Attributions are expected-gradients "
+                            f"SHAP values summed over the window.</div>", unsafe_allow_html=True)
+                camp = expl.get("campaign")
+                if camp:
+                    st.markdown(f"<div class='sn-card'><h4>Campaign · {camp['flows']} flows grouped into this alert</h4>"
+                                f"{a['src_ip']} kept triggering the LSTM for {camp['duration_s']:,.0f} s: "
+                                f"{camp['distinct_hosts']} destination host(s), {camp['distinct_ports']} port(s), peak "
+                                f"score {camp['max_p_seq']:.3f}. Later flows were folded into this alert instead of "
+                                f"raising their own.</div>", unsafe_allow_html=True)
+                    st.markdown("".join(f"<span class='sn-chip mono'>{x}</span>" for x in camp.get("sample_ports", [])),
+                                unsafe_allow_html=True)
+                stp = pd.DataFrame(expl.get("steps", []))
+                if not stp.empty:
+                    stp["flow"] = [f"t-{len(stp) - 1 - k}" if k < len(stp) - 1 else "this flow" for k in range(len(stp))]
+                    stp["target"] = stp["dst"].astype(str) + ":" + stp["dport"].astype(str)
+                    fig = px.bar(stp, x="flow", y="shap", hover_data=["target", "proto", "p_flow"],
+                                 color=stp["shap"] > 0, color_discrete_map={True: C["high"], False: C["low"]},
+                                 title="Which of the host's recent flows pushed the score")
+                    st.plotly_chart(fig_style(fig, 280, False), width="stretch")
             contrib = pd.DataFrame(expl.get("contributions", []))
             if not contrib.empty:
                 contrib["label"] = contrib.apply(lambda r: f"{FEATURE_LABELS.get(r['feature'], r['feature'])} = "
@@ -645,7 +712,8 @@ def page_models():
                f"CIC-IDS2017 {notes.get('cic_train', 0):,} train / {notes.get('cic_test', 0):,} test flows · "
                f"UNSW-NB15 official split {notes.get('unsw_train', 0):,} / {notes.get('unsw_test', 0):,}")
 
-    t1, t2, t3, t4, t5 = st.tabs(["In-dataset", "Cross-dataset", "Rare attacks", "Adversarial robustness", "Explainability"])
+    t1, t2, t3, t4, t5, t6 = st.tabs(["In-dataset", "Cross-dataset", "Rare attacks", "Adversarial robustness",
+                                      "Explainability", "Sequence model (LSTM)"])
     with t1:
         d = ind[ind["f1"].notna()] if "f1" in ind else ind
         cols = [k for k in ["train", "setting", "model", "precision", "recall", "f1", "fpr", "roc_auc", "macro_f1_category"] if k in d]
@@ -706,6 +774,108 @@ def page_models():
                          title="Mean |SHAP| (global feature importance)")
             fig.update_traces(marker_color=C["accent"])
             st.plotly_chart(fig_style(fig, 460, False), width="stretch")
+    with t6:
+        sequence_tab(ev, notes)
+
+
+def page_sensors():
+    header("Sensors", "Every SafeNet sensor reporting to this console")
+
+    @st.fragment(run_every=10)
+    def fleet():
+        s = d_sensors()
+        if s.empty:
+            st.info("No sensor has registered yet.")
+            return
+        s = s.assign(status=s["last_seen"].map(lambda t: "online" if online(t) else f"offline · {ago(t)}"))
+        c = st.columns(4)
+        kpi(c[0], "Sensors", f"{len(s)}", "registered")
+        kpi(c[1], "Online", f"{int(s['last_seen'].map(online).sum())}", f"heartbeat within {ONLINE_S} s", "ok")
+        kpi(c[2], "Flows · 24h", fmt_n(s["flows_24h"].sum()), "all sensors", "violet")
+        kpi(c[3], "Alerts · 24h", f"{int(s['alerts_24h'].sum()):,}", "all sensors",
+            "high" if s["alerts_24h"].sum() else "ok")
+        st.dataframe(s[["status", "hostname", "interface", "model_version", "started_at", "last_seen", "packets_seen",
+                        "flows_scored", "flows_24h", "alerts_24h"]], hide_index=True, width="stretch", column_config={
+            "started_at": st.column_config.DatetimeColumn("Session started (UTC)", format="MMM D HH:mm"),
+            "last_seen": st.column_config.DatetimeColumn("Last heartbeat (UTC)", format="MMM D HH:mm:ss"),
+            "packets_seen": st.column_config.NumberColumn("Packets (session)", format="compact"),
+            "flows_scored": st.column_config.NumberColumn("Flows (session)", format="compact"),
+            "flows_24h": st.column_config.NumberColumn("Flows · 24h", format="compact"),
+            "alerts_24h": "Alerts · 24h"})
+        tl = q("""select date_trunc('minute', f.ts_end) t, s.hostname || ' · ' || s.interface sensor, count(*) flows
+                  from safenet.flows f join safenet.sensors s on s.id = f.sensor_id
+                  where f.ts_end > now() - interval '3 hours' group by 1, 2 order by 1""")
+        if not tl.empty:
+            fig = px.area(tl, x="t", y="flows", color="sensor", title="Flows per minute by sensor · last 3 hours (UTC)")
+            st.plotly_chart(fig_style(fig, 300), width="stretch")
+
+    fleet()
+    st.markdown("""
+<div class='sn-card'><h4>Covering more of the network</h4>
+A sensor sees the traffic that reaches its own network interface. On Wi-Fi and switched Ethernet that is the
+host's own traffic: other devices' frames are encrypted with their own keys or never forwarded to this port.
+To watch other machines, run more sensors. They all report to this console:
+<ul>
+<li><b>On each computer</b>: macOS LaunchDaemon (<code>scripts/install_sensor_service.sh</code>) or Linux systemd
+(<code>scripts/install_sensor_linux.sh</code>).</li>
+<li><b>In Docker</b>: <code>docker run --net=host --cap-add NET_RAW --cap-add NET_ADMIN -e DATABASE_URL=… safenet-sensor</code>.</li>
+<li><b>Whole segment</b>: run one sensor on the gateway (Linux router or Raspberry Pi routing the LAN), or on a host
+attached to a switch <i>mirror / SPAN</i> port. It then sees every device behind it.</li>
+</ul>
+Models are fetched from the project's GitHub release, so a new sensor needs no training data.
+<a class='sn-chip' target='_blank' href='https://github.com/Shivansharmaaaa/safenet-ids/blob/main/docs/DEPLOY.md'>Deployment guide</a>
+</div>""", unsafe_allow_html=True)
+
+
+def sequence_tab(ev: pd.DataFrame, notes: dict) -> None:
+    seq = pd.concat([_metrics(ev, e).assign(experiment=e) for e in ("seq_in_dataset", "seq_cross_dataset", "seq_combined")],
+                    ignore_index=True)
+    if seq.empty:
+        st.info("The sequence model has not been trained yet. Run `python -m scripts.train_sequence`.")
+        return
+    sn = notes.get("sequence", {})
+    st.markdown("<div class='sn-card'><h4>Per-host LSTM vs single-flow XGBoost, on exactly the same flows</h4>"
+                "Each flow is scored together with the same host's previous 15 flows (their 22 flow features plus the "
+                "gap between flows and whether the destination host and port repeat). <b>LSTM-NoTiming</b> cannot "
+                "see the five features that mostly measure network round-trip time (duration, rates, packet gaps), "
+                "so a scan across the internet is judged like one on a LAN. <b>LSTM-NoTiming-Adv</b> is the same model "
+                "trained with adversarially perturbed attack windows (padding, slowing and packet injection on every "
+                "attacker flow, budgets up to ε = 2). Data: CIC-IDS2017 re-labelled "
+                "by KU Leuven DistriNet and the full UNSW-NB15 records, which keep IPs and timestamps. Split: random "
+                "10-minute time buckets (70 % train, 10 % validation, 20 % test)."
+                + (f" Live model <code>{sn.get('version')}</code> ({sn.get('live_variant', 'LSTM')})." if sn else "")
+                + "</div>", unsafe_allow_html=True)
+    seq = seq.assign(pair=seq["train"] + " → " + seq["test"])
+    cols = [c for c in ["pair", "model", "precision", "recall", "f1", "fpr", "roc_auc"] if c in seq]
+    st.dataframe(seq[cols].rename(columns={"pair": "train → test"}), hide_index=True, width="stretch",
+                 column_config={k: st.column_config.ProgressColumn(k, min_value=0, max_value=1, format="%.4f")
+                                for k in ["precision", "recall", "f1", "roc_auc"]})
+    fig = px.bar(seq, x="pair", y="f1", color="model", barmode="group", range_y=[0, 1],
+                 color_discrete_map=SEQ_COLORS,
+                 title="F1 · in-dataset, cross-dataset and combined training")
+    st.plotly_chart(fig_style(fig, 340), width="stretch")
+    rows = []
+    for _, r in ev[ev["experiment"].isin(["seq_in_dataset", "seq_combined"])].iterrows():
+        for cat, d in (r["metrics"].get("per_category") or {}).items():
+            rows.append(dict(train=DS.get(r["train_ds"]), test=DS.get(r["test_ds"]), model=r["model"], category=cat,
+                             n=d["n"], detected=d["detected"]))
+    if rows:
+        pc = pd.DataFrame(rows)
+        a, b = st.columns(2)
+        tsel = a.segmented_control("Trained on", sorted(pc["train"].unique()), default="Both", key="seq_tr")
+        esel = b.segmented_control("Tested on", sorted(pc["test"].unique()), default="CIC-IDS2017", key="seq_te")
+        sub = pc[(pc["train"] == tsel) & (pc["test"] == esel)]
+        fig = px.bar(sub, x="detected", y="category", color="model", barmode="group", orientation="h", range_x=[0, 1],
+                     hover_data=["n"], color_discrete_map=SEQ_COLORS,
+                     title="Detection rate per attack category (for Benign: false-alarm rate)")
+        st.plotly_chart(fig_style(fig, 360), width="stretch")
+    rb = _metrics(ev, "seq_robustness")
+    if not rb.empty:
+        fig = px.line(rb.sort_values("eps"), x="eps", y="detection_rate", color="model", facet_col="test", markers=True,
+                      color_discrete_map=SEQ_COLORS,
+                      labels={"eps": "attacker budget ε", "detection_rate": "attacks still detected"},
+                      title="Adaptive evasion · the attacker perturbs ALL their flows in the window (and spaces them out)")
+        st.plotly_chart(fig_style(fig.update_layout(yaxis_range=[0, 1.02]), 340), width="stretch")
 
 
 def page_about():
@@ -715,11 +885,12 @@ def page_about():
 Packets captured on a real interface → bidirectional flows (5-tuple, FIN/RST, 15 s idle / 120 s active timeout,
 TSO super-packets re-split to wire frames) → 22 shared flow features computable identically from CIC-IDS2017,
 UNSW-NB15 and live traffic → <b>XGBoost (adversarially trained)</b> attack probability, <b>XGBoost</b> attack type,
-<b>PyTorch autoencoder</b> anomaly score → SHAP explanation → MITRE ATT&CK mapping → threat-intel match and
+<b>PyTorch autoencoder</b> anomaly score, <b>per-host LSTM</b> over the host's last 16 flows → SHAP explanation → MITRE ATT&CK mapping → threat-intel match and
 enrichment → PostgreSQL (Supabase) → this console (Streamlit, Google sign-in).</div>
 <div class='sn-card'><h4>Data and services</h4>
 <a class='sn-chip' target='_blank' href='https://www.unb.ca/cic/datasets/ids-2017.html'>CIC-IDS2017 · UNB</a>
 <a class='sn-chip' target='_blank' href='https://research.unsw.edu.au/projects/unsw-nb15-dataset'>UNSW-NB15 · UNSW Canberra</a>
+<a class='sn-chip' target='_blank' href='https://intrusion-detection.distrinet-research.be/CNS2022/'>CIC-IDS2017 re-labelled · KU Leuven DistriNet</a>
 <a class='sn-chip' target='_blank' href='https://feodotracker.abuse.ch/'>abuse.ch Feodo Tracker</a>
 <a class='sn-chip' target='_blank' href='https://www.spamhaus.org/drop/'>Spamhaus DROP</a>
 <a class='sn-chip' target='_blank' href='https://www.cisa.gov/known-exploited-vulnerabilities-catalog'>CISA KEV</a>
@@ -732,8 +903,9 @@ enrichment → PostgreSQL (Supabase) → this console (Streamlit, Google sign-in
 <a class='sn-chip' target='_blank' href='https://github.com/Shivansharmaaaa/safenet-ids/blob/main/docs/REPORT.md'>Performance report</a>
 </div>
 <div class='sn-card'><h4>Alert policy</h4>
-A flow raises an alert when the adversarially-trained XGBoost scores it ≥ 0.90, when the autoencoder error is ≥ 5×
-its benign threshold, or when the remote IP is on a blocklist. Behavioural rules over a 60 s window add multi-flow
+A flow raises an alert when the adversarially-trained XGBoost scores it ≥ 0.90, when the per-host LSTM scores it
+≥ 0.90 in the context of the host's previous flows, when the autoencoder error is ≥ 5× its benign threshold, or when
+the remote IP is on a blocklist. Behavioural rules over a 60 s window add multi-flow
 detections the per-flow models cannot see: vertical port scans (≥ 25 ports on one host), horizontal sweeps
 (≥ 25 hosts on one port) and brute force (≥ 15 short sessions to SSH/RDP/FTP/SMB/database ports). ICMP and other non-TCP/UDP protocols, and local
 multicast/broadcast discovery (mDNS, SSDP), are outside what the models were trained on: they are still scored
@@ -759,11 +931,17 @@ pages = [
     st.Page(page_alerts, title="Alerts", icon=":material/notification_important:", url_path="alerts"),
     st.Page(page_intel, title="Threat intel", icon=":material/travel_explore:", url_path="intel"),
     st.Page(page_models, title="Model lab", icon=":material/science:", url_path="models"),
+    st.Page(page_sensors, title="Sensors", icon=":material/sensors:", url_path="sensors"),
     st.Page(page_about, title="About", icon=":material/info:", url_path="about"),
 ]
 nav = st.navigation(pages, position="sidebar")
 
 with st.sidebar:
+    _s = d_sensors()
+    if len(_s) > 1:
+        _opts = [None] + _s["id"].tolist()
+        _names = {r.id: f"{'🟢' if online(r.last_seen) else '⚪'} {r.hostname} · {r.interface}" for r in _s.itertuples()}
+        st.selectbox("Sensor", _opts, key="sensor_id", format_func=lambda i: "All sensors" if i is None else _names[i])
     st.divider()
     if _auth_configured() and st.user.is_logged_in:
         st.caption(f"Signed in as **{st.user.email}**")
