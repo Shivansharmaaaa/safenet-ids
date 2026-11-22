@@ -16,7 +16,7 @@ jobs:
           cache: pip
       - name: Install
         run: |
-          pip install numpy pandas pyarrow scapy python-dotenv pytest
+          pip install numpy pandas pyarrow scapy python-dotenv pytest joblib shap
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
       - name: Unit tests (flow meter, feature mapping, adversarial, behaviour rules, policy, intel, sequences)
