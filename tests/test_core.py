@@ -254,7 +254,7 @@ def test_lstm_alerts_from_one_host_are_grouped_into_one_campaign():
 def test_adaptive_adversarial_training_only_perturbs_attacker_flows():
     import torch
     from safenet import sequence as sq
-    from scripts.train_sequence import adaptive_augmenter
+    from safenet.sequence import adaptive_augmenter
     rng = np.random.default_rng(0)
     n = 200
     raw = np.abs(rng.normal(5, 3, (n, len(COMMON_FEATURES)))).astype(np.float32)

@@ -21,6 +21,7 @@ import pandas as pd
 import torch
 from torch import nn
 
+from . import adversarial as adv
 from .features import COMMON_FEATURES, FEATURE_DESCRIPTIONS, to_model_space
 
 SEQ_LEN = 16
@@ -154,6 +155,72 @@ def train(steps: np.ndarray, start: np.ndarray, y: np.ndarray, train_idx: np.nda
             best, best_state = vloss, {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
     model.load_state_dict(best_state)
     return model.cpu().eval()
+
+
+# ---------------------------------------------------------------------------------------- adversarial training
+ADV_FRAC, ADV_MAX_EPS = 0.5, 2.0
+
+
+def perturb_windows(win: np.ndarray, raw: np.ndarray, y: np.ndarray, start: np.ndarray, idx: np.ndarray,
+                    pad, slow, inj) -> np.ndarray:
+    """The attacker's view of windows ending at idx: every ATTACK flow in each window is padded, slowed (longer
+    flows and longer gaps before them) and given injected packets. Benign flows of the host are untouched.
+    pad / slow / inj: scalars or one budget per window. Returns a new array."""
+    K, F = SEQ_LEN, len(COMMON_FEATURES)
+    offs = np.arange(K - 1, -1, -1)
+    rows = idx[:, None] - offs[None, :]
+    valid = rows >= start[idx][:, None]
+    rows_c = np.where(valid, rows, 0)
+    att = (y[rows_c] == 1) & valid
+    per = lambda v: np.repeat(np.broadcast_to(np.asarray(v, dtype=np.float64), (len(idx),)), K)
+    pert = adv.perturb(pd.DataFrame(raw[rows_c].reshape(-1, F), columns=COMMON_FEATURES),
+                       per(pad), per(slow), per(inj)).values
+    out = win.copy()
+    out[..., :F] = np.where(att[..., None], to_model_space(pert).reshape(len(idx), K, F), out[..., :F])
+    gap = np.expm1(out[..., F])
+    slow_k = per(slow).reshape(len(idx), K)
+    out[..., F] = np.where(att, np.log1p(np.floor(np.rint(gap) * (1 + slow_k) + 1e-6)), out[..., F])
+    return out.astype(np.float32)
+
+
+def adv_augmenter(raw: np.ndarray, y: np.ndarray, start: np.ndarray):
+    """Adversarial training: half of each batch's attack windows are replaced by a random evasion attempt with a
+    budget up to ADV_MAX_EPS (same perturbation family as the evaluation, random rather than adaptive)."""
+    def aug(xb: np.ndarray, b: np.ndarray, rng: np.random.Generator, model=None) -> None:
+        pos = np.where((y[b] == 1) & (rng.random(len(b)) < ADV_FRAC))[0]
+        if len(pos) == 0:
+            return
+        eps = rng.uniform(0, ADV_MAX_EPS, len(pos))
+        pad, slow, inj = rng.random((3, len(pos))) * eps
+        xb[pos] = perturb_windows(xb[pos], raw, y, start, b[pos], pad, slow, inj)
+    return aug
+
+
+# the corners of the attacker's budget cube [0, eps]^3 (pad, slow, inject), without the unperturbed one
+_CORNERS = np.array([(p, s, k) for p in (0, 1) for s in (0, 1) for k in (0, 1)][1:], dtype=np.float64)
+
+
+def adaptive_augmenter(raw: np.ndarray, y: np.ndarray, start: np.ndarray):
+    """Adaptive adversarial training: for half of each batch's attack windows, try the 7 corners of a random budget
+    cube plus one random interior point against the CURRENT model and train on the attempt it scores lowest.
+    The evaluation attacker searches a finer grid (64 points) at fixed budgets, so it stays the stronger one."""
+    def aug(xb: np.ndarray, b: np.ndarray, rng: np.random.Generator, model=None) -> None:
+        pos = np.where((y[b] == 1) & (rng.random(len(b)) < ADV_FRAC))[0]
+        if len(pos) == 0 or model is None:
+            return
+        eps = rng.uniform(0, ADV_MAX_EPS, len(pos))
+        cands = [_CORNERS[c][None, :] * eps[:, None] for c in range(len(_CORNERS))]
+        cands.append(rng.random((len(pos), 3)) * eps[:, None])
+        best_p, best_w = np.full(len(pos), np.inf), xb[pos].copy()
+        dev = next(model.parameters()).device
+        with torch.no_grad():
+            for c in cands:
+                w = perturb_windows(xb[pos], raw, y, start, b[pos], c[:, 0], c[:, 1], c[:, 2])
+                p = torch.sigmoid(model(torch.from_numpy(w).to(dev))).cpu().numpy()
+                better = p < best_p
+                best_p[better], best_w[better] = p[better], w[better]
+        xb[pos] = best_w
+    return aug
 
 
 # ---------------------------------------------------------------------------------------- explanation
