@@ -806,7 +806,8 @@ def page_sensors():
                   from safenet.flows f join safenet.sensors s on s.id = f.sensor_id
                   where f.ts_end > now() - interval '3 hours' group by 1, 2 order by 1""")
         if not tl.empty:
-            fig = px.area(tl, x="t", y="flows", color="sensor", title="Flows per minute by sensor · last 3 hours (UTC)")
+            fig = px.area(tl, x="t", y="flows", color="sensor", labels={"t": "time (UTC)", "flows": "flows per minute"},
+                          title="Flows per minute by sensor · last 3 hours (UTC)")
             st.plotly_chart(fig_style(fig, 300), width="stretch")
 
     fleet()
