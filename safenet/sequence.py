@@ -117,7 +117,7 @@ def predict(model: SeqLSTM, steps: np.ndarray, start: np.ndarray, idx: np.ndarra
 def train(steps: np.ndarray, start: np.ndarray, y: np.ndarray, train_idx: np.ndarray, val_idx: np.ndarray,
           epochs: int = 4, batch: int = 4096, lr: float = 2e-3, seed: int = 42, log=print, drop=(),
           augment=None) -> SeqLSTM:
-    """augment(windows, idx, rng) may rewrite a batch's windows in place (adversarial training)."""
+    """augment(windows, idx, rng, model) may rewrite a batch's windows in place (adversarial training)."""
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
     dev = device()
@@ -136,7 +136,7 @@ def train(steps: np.ndarray, start: np.ndarray, y: np.ndarray, train_idx: np.nda
             b = order[i:i + batch]
             xb = gather(steps, start, b)
             if augment is not None:
-                augment(xb, b, rng)
+                augment(xb, b, rng, model)
             x = torch.from_numpy(xb).to(dev)
             t = torch.from_numpy(y[b].astype(np.float32)).to(dev)
             opt.zero_grad()

@@ -94,7 +94,7 @@ FEATURE_LABELS = {
     "same_dport": "Same destination port as previous flow",
 }
 DS = {"cicids2017": "CIC-IDS2017", "unswnb15": "UNSW-NB15", "combined": "Both"}
-SEQ_COLORS = {"LSTM": "#22D3EE", "LSTM-NoTiming": "#10B981", "LSTM-NoTiming-Adv": "#F59E0B", "XGBoost": "#818CF8"}
+SEQ_COLORS = {"LSTM": "#22D3EE", "LSTM-NoTiming": "#10B981", "LSTM-NoTiming-Adv": "#F59E0B", "LSTM-NoTiming-AdvAdaptive": "#F43F5E", "XGBoost": "#818CF8"}
 
 
 # ============================================================================ auth (Google OIDC)
@@ -840,7 +840,8 @@ def sequence_tab(ev: pd.DataFrame, notes: dict) -> None:
                 "see the five features that mostly measure network round-trip time (duration, rates, packet gaps), "
                 "so a scan across the internet is judged like one on a LAN. <b>LSTM-NoTiming-Adv</b> is the same model "
                 "trained with adversarially perturbed attack windows (padding, slowing and packet injection on every "
-                "attacker flow, budgets up to ε = 2). Data: CIC-IDS2017 re-labelled "
+                "attacker flow, budgets up to ε = 2); <b>…-AdvAdaptive</b> trains on the strongest of 8 such attempts "
+                "against itself. Data: CIC-IDS2017 re-labelled "
                 "by KU Leuven DistriNet and the full UNSW-NB15 records, which keep IPs and timestamps. Split: random "
                 "10-minute time buckets (70 % train, 10 % validation, 20 % test)."
                 + (f" Live model <code>{sn.get('version')}</code> ({sn.get('live_variant', 'LSTM')})." if sn else "")

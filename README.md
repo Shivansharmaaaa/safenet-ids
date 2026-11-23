@@ -50,16 +50,18 @@ the public **CIC-IDS2017** and **UNSW-NB15** datasets and are tested **across** 
 4. **Adversarial training**: XGBoost retrained with perturbed attacks. Clean accuracy is compared and robustness re-measured.
 
 ## Per-host sequence model (`scripts/train_sequence.py`)
-Each flow is scored together with the same host's previous 15 flows. Three LSTM variants are compared with an XGBoost
+Each flow is scored together with the same host's previous 15 flows. Four LSTM variants are compared with an XGBoost
 trained on exactly the same rows: **LSTM** (all features), **LSTM-NoTiming** (the five round-trip-time features
-masked, after the full LSTM missed a real internet scan because it had learned LAN speed), and
-**LSTM-NoTiming-Adv** (masked, plus adversarial training; deployed). Headline numbers, combined training:
+masked, after the full LSTM missed a real internet scan because it had learned LAN speed), **LSTM-NoTiming-Adv**
+(masked, plus random adversarial training) and **LSTM-NoTiming-AdvAdaptive** (trained on the strongest evasion attempt
+against itself; deployed). Headline numbers, combined training:
 
-| | CIC-IDS2017 F1 | UNSW-NB15 F1 | CIC attacks detected at ε = 2 | Real `scanme.nmap.org` scan, flows flagged | False alarms on the Mac's traffic |
-|---|---|---|---|---|---|
-| LSTM | 0.995 | 0.959 | 44 % | ≈ 0 % | 0.047 % |
-| LSTM-NoTiming | 0.997 | 0.957 | 54 % | 87 % | 0.016 % |
-| **LSTM-NoTiming-Adv** | 0.993 | 0.959 | **98 %** | 78 % (one grouped alert) | **0.013 %** |
+| | CIC-IDS2017 F1 | UNSW-NB15 F1 | Attacks detected at ε = 2 (CIC / UNSW) | UNSW at ε = 1 | Real `scanme.nmap.org` scan, flows flagged | False alarms on the Mac's traffic |
+|---|---|---|---|---|---|---|
+| LSTM | 0.995 | 0.959 | 44 % / 32 % | 38 % | ≈ 0 % | 0.047 % |
+| LSTM-NoTiming | 0.997 | 0.957 | 54 % / 25 % | 36 % | 87 % | 0.016 % |
+| LSTM-NoTiming-Adv | 0.993 | 0.959 | **98 %** / 31 % | 37 % | 78 % | **0.014 %** |
+| **LSTM-NoTiming-AdvAdaptive** | 0.993 | 0.960 | **98 %** / **51 %** | **97 %** | 78 % (one grouped alert) | 0.028 % |
 
 Details, per-category results and limitations: [docs/REPORT.md §6](docs/REPORT.md).
 
@@ -91,7 +93,7 @@ DATABASE_URL=postgresql://postgres.<project-ref>:<password>@aws-0-<region>.poole
 
 ```bash
 .venv/bin/python -m scripts.train                       # ~10 min: experiments + live model + DB push
-.venv/bin/python -m scripts.train_sequence              # ~10 min: three LSTM variants + comparison + DB push
+.venv/bin/python -m scripts.train_sequence              # ~18 min: four LSTM variants + comparison + DB push
 sudo .venv/bin/python -m scripts.sensor --iface en0     # live capture (root needed for packet capture)
 sudo bash scripts/install_sensor_service.sh             # or: run the sensor permanently via launchd
 docker build -t safenet-sensor . && docker run --net=host --cap-add NET_RAW --cap-add NET_ADMIN \

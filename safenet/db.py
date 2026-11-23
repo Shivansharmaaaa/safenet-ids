@@ -15,7 +15,10 @@ SCHEMA_SQL = Path(__file__).resolve().parent.parent / "sql" / "schema.sql"
 @contextmanager
 def connect(url: str):
     # prepare_threshold=None keeps us compatible with Supabase's transaction pooler
-    with psycopg.connect(url, autocommit=False, prepare_threshold=None, connect_timeout=15) as conn:
+    # TCP keepalives: a connection that died while the machine slept or the network changed raises within ~35 s
+    # instead of blocking a read forever
+    with psycopg.connect(url, autocommit=False, prepare_threshold=None, connect_timeout=15,
+                         keepalives=1, keepalives_idle=20, keepalives_interval=5, keepalives_count=3) as conn:
         yield conn
 
 

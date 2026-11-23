@@ -7,6 +7,7 @@ usage (needs root for packet capture on macOS/Linux):
 from __future__ import annotations
 
 import argparse
+import os
 import queue
 import signal
 import socket
@@ -29,6 +30,26 @@ from safenet.intel import ThreatFeeds, enrich_ip, mitre_for, remote_ip
 from safenet.sequence import SEQ_LEN, STEP_FEATURES, HostHistory, SeqExplainer, SeqLSTM
 
 STOP = False
+# Watchdog: if the main loop makes no progress for WATCHDOG_S (a hung socket, a stuck capture thread, anything), the
+# process exits and the service manager (launchd / systemd / Docker) starts a fresh one. time.monotonic() stops while
+# a Mac sleeps, so sleeping is not mistaken for a hang.
+WATCHDOG_S = 300.0
+WATCHDOG_CHECK_S = 15.0
+_PROGRESS = time.monotonic()
+
+
+def progress() -> None:
+    global _PROGRESS
+    _PROGRESS = time.monotonic()
+
+
+def _watchdog() -> None:
+    while True:
+        time.sleep(WATCHDOG_CHECK_S)
+        stalled = time.monotonic() - _PROGRESS
+        if stalled > WATCHDOG_S:
+            log(f"watchdog: no progress for {stalled:.0f} s; exiting so the service restarts the sensor")
+            os._exit(3)
 # A host's LSTM alerts within CAMPAIGN_GAP_S of each other form one campaign: one alert, with the later flows folded
 # into it (a 50-port scan is one incident, not 50). A campaign is closed after CAMPAIGN_MAX_S so it cannot run forever.
 CAMPAIGN_GAP_S = 600.0
@@ -305,6 +326,9 @@ def main():
 
     from scapy.all import AsyncSniffer, conf, sniff
 
+    if not args.pcap:
+        progress()
+        threading.Thread(target=_watchdog, name="watchdog", daemon=True).start()
     url = database_url()
     db.init_schema(url)
     feeds = ThreatFeeds()
@@ -349,6 +373,7 @@ def main():
         mtimes = {p: p.stat().st_mtime if p.exists() else 0 for p in watched}
         try:
             while not STOP:
+                progress()
                 time.sleep(args.interval)
                 stats["packets"] = table.packets
                 try:

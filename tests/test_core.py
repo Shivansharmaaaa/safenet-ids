@@ -249,3 +249,39 @@ def test_lstm_alerts_from_one_host_are_grouped_into_one_campaign():
     out2 = [dict(p_attack=0.0, is_alert=False)]
     s._sequence([late], out2, ["Scan"], np.zeros(1))
     assert "alert" in out2[0]
+
+
+def test_adaptive_adversarial_training_only_perturbs_attacker_flows():
+    import torch
+    from safenet import sequence as sq
+    from scripts.train_sequence import adaptive_augmenter
+    rng = np.random.default_rng(0)
+    n = 200
+    raw = np.abs(rng.normal(5, 3, (n, len(COMMON_FEATURES)))).astype(np.float32)
+    host, ts = np.repeat(np.arange(10), 20), np.tile(np.arange(20) * 3.0, 10)
+    dst, dport = rng.integers(0, 3, n), rng.integers(0, 3, n)
+    steps = sq.step_matrix(pd.DataFrame(raw, columns=COMMON_FEATURES), host, ts, dst, dport)
+    start = sq.host_starts(host)
+    y = (rng.random(n) < 0.5).astype(np.int8)
+    idx = np.arange(n)
+    base = sq.gather(steps, start, idx)
+    xb = base.copy()
+    torch.manual_seed(0)
+    adaptive_augmenter(raw, y, start)(xb, idx, rng, sq.SeqLSTM(drop=sq.TIMING_FEATURES).eval())
+    changed = np.abs(xb - base).sum(-1) > 1e-6                       # [window, step]
+    offs = np.arange(sq.SEQ_LEN - 1, -1, -1)
+    rows = idx[:, None] - offs[None, :]
+    valid = rows >= start[idx][:, None]
+    attacker = (y[np.where(valid, rows, 0)] == 1) & valid
+    assert changed.any() and not (changed & ~attacker).any()          # benign flows and padding untouched
+    assert (y[changed.any(1)] == 1).all()                             # only attack windows are rewritten
+
+
+def test_watchdog_exits_a_stalled_sensor():
+    import subprocess
+    import sys
+    code = ("import time, threading, scripts.sensor as s\n"
+            "s.WATCHDOG_S = 1\ns.WATCHDOG_CHECK_S = 0.2\ns.progress()\n"
+            "threading.Thread(target=s._watchdog, daemon=True).start()\ntime.sleep(60)\n")
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=50)
+    assert r.returncode == 3 and "watchdog" in r.stdout

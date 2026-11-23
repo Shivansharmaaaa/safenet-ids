@@ -38,8 +38,10 @@ RNG = np.random.default_rng(SEED)
 RESULTS: list[dict] = []
 NAMES = {"cic": "cicids2017", "unsw": "unswnb15", "both": "combined"}
 # "LSTM" sees all 22 flow features; "LSTM-NoTiming" cannot see the five that mostly measure network round-trip time
-VARIANTS = {"LSTM": [], "LSTM-NoTiming": sq.TIMING_FEATURES, "LSTM-NoTiming-Adv": sq.TIMING_FEATURES}
-ADVERSARIAL = {"LSTM-NoTiming-Adv"}          # trained on adversarially perturbed attack windows
+VARIANTS = {"LSTM": [], "LSTM-NoTiming": sq.TIMING_FEATURES, "LSTM-NoTiming-Adv": sq.TIMING_FEATURES,
+            "LSTM-NoTiming-AdvAdaptive": sq.TIMING_FEATURES}
+# trained on adversarially perturbed attack windows: a random attempt, or the worst of several against the model itself
+ADVERSARIAL = {"LSTM-NoTiming-Adv": "random", "LSTM-NoTiming-AdvAdaptive": "adaptive"}
 ADV_FRAC, ADV_MAX_EPS = 0.5, 2.0
 
 
@@ -68,13 +70,40 @@ def perturb_windows(win: np.ndarray, raw: np.ndarray, y: np.ndarray, start: np.n
 def adv_augmenter(raw: np.ndarray, y: np.ndarray, start: np.ndarray):
     """Adversarial training: half of each batch's attack windows are replaced by a random evasion attempt with a
     budget up to ADV_MAX_EPS (same perturbation family as the evaluation, random rather than adaptive)."""
-    def aug(xb: np.ndarray, b: np.ndarray, rng: np.random.Generator) -> None:
+    def aug(xb: np.ndarray, b: np.ndarray, rng: np.random.Generator, model=None) -> None:
         pos = np.where((y[b] == 1) & (rng.random(len(b)) < ADV_FRAC))[0]
         if len(pos) == 0:
             return
         eps = rng.uniform(0, ADV_MAX_EPS, len(pos))
         pad, slow, inj = rng.random((3, len(pos))) * eps
         xb[pos] = perturb_windows(xb[pos], raw, y, start, b[pos], pad, slow, inj)
+    return aug
+
+
+# the corners of the attacker's budget cube [0, eps]^3 (pad, slow, inject), without the unperturbed one
+_CORNERS = np.array([(p, s, k) for p in (0, 1) for s in (0, 1) for k in (0, 1)][1:], dtype=np.float64)
+
+
+def adaptive_augmenter(raw: np.ndarray, y: np.ndarray, start: np.ndarray):
+    """Adaptive adversarial training: for half of each batch's attack windows, try the 7 corners of a random budget
+    cube plus one random interior point against the CURRENT model and train on the attempt it scores lowest.
+    The evaluation attacker searches a finer grid (64 points) at fixed budgets, so it stays the stronger one."""
+    def aug(xb: np.ndarray, b: np.ndarray, rng: np.random.Generator, model=None) -> None:
+        pos = np.where((y[b] == 1) & (rng.random(len(b)) < ADV_FRAC))[0]
+        if len(pos) == 0 or model is None:
+            return
+        eps = rng.uniform(0, ADV_MAX_EPS, len(pos))
+        cands = [_CORNERS[c][None, :] * eps[:, None] for c in range(len(_CORNERS))]
+        cands.append(rng.random((len(pos), 3)) * eps[:, None])
+        best_p, best_w = np.full(len(pos), np.inf), xb[pos].copy()
+        dev = next(model.parameters()).device
+        with torch.no_grad():
+            for c in cands:
+                w = perturb_windows(xb[pos], raw, y, start, b[pos], c[:, 0], c[:, 1], c[:, 2])
+                p = torch.sigmoid(model(torch.from_numpy(w).to(dev))).cpu().numpy()
+                better = p < best_p
+                best_p[better], best_w[better] = p[better], w[better]
+        xb[pos] = best_w
     return aug
 
 
@@ -187,9 +216,15 @@ def main():
     ap.add_argument("--epochs", type=int, default=4)
     ap.add_argument("--no-db", action="store_true")
     ap.add_argument("--out", default=str(MODELS_DIR / "sequence_bundle.pt"), help="where to write the live bundle")
-    ap.add_argument("--live", default="LSTM-NoTiming-Adv", choices=list(VARIANTS), help="variant saved as the live bundle")
+    ap.add_argument("--live", default="LSTM-NoTiming-AdvAdaptive", choices=list(VARIANTS), help="variant saved as the live bundle")
     ap.add_argument("--save-variants", default=None, help="also save every variant's combined model to this folder")
+    ap.add_argument("--push", action="store_true",
+                    help="only push the saved sequence_results.json to the database (after a --no-db run)")
     args = ap.parse_args()
+    if args.push:
+        saved = json.loads((REPORTS_DIR / "sequence_results.json").read_text())
+        push(saved["results"], saved["notes"])
+        return
 
     log("loading CIC-IDS2017 (DistriNet re-labelled) and UNSW-NB15 full records")
     cdf = load_cicids2017_full()
@@ -205,7 +240,8 @@ def main():
         steps, raw, start, y, tr, va, _ = stack(ps)
         for v, drop in VARIANTS.items():
             log(f"== training {v} on {NAMES[key]} ({len(tr):,} windows, {args.epochs} epochs, {dev})")
-            aug = adv_augmenter(raw, y, start) if v in ADVERSARIAL else None
+            aug = {"random": adv_augmenter, "adaptive": adaptive_augmenter}[ADVERSARIAL[v]](raw, y, start) \
+                if v in ADVERSARIAL else None
             models[(v, key)] = sq.train(steps, start, y, tr, va, epochs=args.epochs, log=log, drop=drop,
                                         augment=aug).to(dev)
         Xtr = to_model_space(np.concatenate([p.raw[p.tr] for p in ps]))
@@ -251,7 +287,7 @@ def main():
     def save(variant: str, path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         torch.save({"version": version, "variant": variant, "drop": VARIANTS[variant],
-                    "adversarial": variant in ADVERSARIAL,
+                    "adversarial": ADVERSARIAL.get(variant),
                     "state_dict": models[(variant, "both")].cpu().eval().state_dict(), "n_feat": len(sq.STEP_FEATURES),
                     "step_features": sq.STEP_FEATURES, "seq_len": sq.SEQ_LEN, "alert_threshold": 0.9,
                     "background": np.concatenate(bg_parts).astype(np.float32)}, path)
@@ -269,17 +305,22 @@ def main():
     (REPORTS_DIR / "sequence_results.json").write_text(json.dumps({"notes": notes, "results": RESULTS}, indent=1,
                                                                    default=float))
     if not args.no_db:
-        with db.connect(database_url()) as conn:
-            rid = conn.execute("select id from safenet.model_runs order by created_at desc limit 1").fetchone()[0]
-            conn.execute("delete from safenet.eval_results where run_id=%s and experiment like 'seq_%%'", (rid,))
-            for r in RESULTS:
-                db.add_eval(conn, rid, r["experiment"], r["model"], r["train_ds"], r["test_ds"], r["metrics"],
-                            r["setting"])
-            conn.execute("update safenet.model_runs set notes = notes || jsonb_build_object('sequence', %s::jsonb) "
-                         "where id=%s", (json.dumps(notes), rid))
-            conn.commit()
-        log(f"pushed {len(RESULTS)} sequence results to run {rid} ({socket.gethostname()})")
+        push(RESULTS, notes)
     log("done")
+
+
+def push(results: list[dict], notes: dict) -> None:
+    """Replace the sequence results of the latest model run in the database."""
+    with db.connect(database_url()) as conn:
+        rid = conn.execute("select id from safenet.model_runs order by created_at desc limit 1").fetchone()[0]
+        conn.execute("delete from safenet.eval_results where run_id=%s and experiment like 'seq_%%'", (rid,))
+        for r in results:
+            db.add_eval(conn, rid, r["experiment"], r["model"], r["train_ds"], r["test_ds"], r["metrics"],
+                        r["setting"])
+        conn.execute("update safenet.model_runs set notes = notes || jsonb_build_object('sequence', %s::jsonb) "
+                     "where id=%s", (json.dumps(notes), rid))
+        conn.commit()
+    log(f"pushed {len(results)} sequence results to run {rid} ({socket.gethostname()})")
 
 
 if __name__ == "__main__":

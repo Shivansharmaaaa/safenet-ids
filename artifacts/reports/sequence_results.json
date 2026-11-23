@@ -1,8 +1,8 @@
 {
  "notes": {
-  "version": "seq-1.2.0+202611220610",
-  "live_variant": "LSTM-NoTiming-Adv",
-  "seconds": 582,
+  "version": "seq-1.2.0+202611230856",
+  "live_variant": "LSTM-NoTiming-AdvAdaptive",
+  "seconds": 1105,
   "epochs": 4,
   "seq_len": 16,
   "cic_tr": 1533171,
@@ -153,6 +153,52 @@
   },
   {
    "experiment": "seq_in_dataset",
+   "model": "LSTM-NoTiming-AdvAdaptive",
+   "train_ds": "cicids2017",
+   "test_ds": "cicids2017",
+   "setting": "per-host sequence",
+   "metrics": {
+    "precision": 0.9987502892848877,
+    "recall": 0.9901230885710025,
+    "f1": 0.9944179776834319,
+    "fpr": 0.0004229372995453424,
+    "n_test": 342530,
+    "n_attack": 87173,
+    "roc_auc": 0.9992028737839745,
+    "per_category": {
+     "Benign": {
+      "n": 255357,
+      "detected": 0.0004229372995453424
+     },
+     "Botnet": {
+      "n": 241,
+      "detected": 0.43983402489626555
+     },
+     "BruteForce": {
+      "n": 463,
+      "detected": 1.0
+     },
+     "DoS": {
+      "n": 57135,
+      "detected": 0.9901986523146933
+     },
+     "Exploit": {
+      "n": 6,
+      "detected": 0.3333333333333333
+     },
+     "Scan": {
+      "n": 29319,
+      "detected": 0.9944745728026194
+     },
+     "WebAttack": {
+      "n": 9,
+      "detected": 1.0
+     }
+    }
+   }
+  },
+  {
+   "experiment": "seq_in_dataset",
    "model": "XGBoost",
    "train_ds": "cicids2017",
    "test_ds": "cicids2017",
@@ -247,6 +293,22 @@
   },
   {
    "experiment": "seq_cross_dataset",
+   "model": "LSTM-NoTiming-AdvAdaptive",
+   "train_ds": "cicids2017",
+   "test_ds": "unswnb15",
+   "setting": "per-host sequence",
+   "metrics": {
+    "precision": 0.47103324706350785,
+    "recall": 0.05811126120594375,
+    "f1": 0.10345883073155801,
+    "fpr": 0.008739786587371552,
+    "n_test": 344727,
+    "n_attack": 40715,
+    "roc_auc": 0.4579604382266567
+   }
+  },
+  {
+   "experiment": "seq_cross_dataset",
    "model": "XGBoost",
    "train_ds": "cicids2017",
    "test_ds": "unswnb15",
@@ -307,6 +369,22 @@
     "n_test": 342530,
     "n_attack": 87173,
     "roc_auc": 0.7686128604026693
+   }
+  },
+  {
+   "experiment": "seq_cross_dataset",
+   "model": "LSTM-NoTiming-AdvAdaptive",
+   "train_ds": "unswnb15",
+   "test_ds": "cicids2017",
+   "setting": "per-host sequence",
+   "metrics": {
+    "precision": 0.01649381481944271,
+    "recall": 0.004542690970828123,
+    "f1": 0.007123455235559712,
+    "fpr": 0.09247054124226084,
+    "n_test": 342530,
+    "n_attack": 87173,
+    "roc_auc": 0.7814893717782669
    }
   },
   {
@@ -423,6 +501,40 @@
      "Scan": {
       "n": 1863,
       "detected": 0.8174986580783682
+     }
+    }
+   }
+  },
+  {
+   "experiment": "seq_in_dataset",
+   "model": "LSTM-NoTiming-AdvAdaptive",
+   "train_ds": "unswnb15",
+   "test_ds": "unswnb15",
+   "setting": "per-host sequence",
+   "metrics": {
+    "precision": 0.9017807270371115,
+    "recall": 0.9913054156944615,
+    "f1": 0.9444262448521153,
+    "fpr": 0.01445995552807126,
+    "n_test": 344727,
+    "n_attack": 40715,
+    "roc_auc": 0.9988370942731309,
+    "per_category": {
+     "Benign": {
+      "n": 304012,
+      "detected": 0.01445995552807126
+     },
+     "DoS": {
+      "n": 570,
+      "detected": 0.9912280701754386
+     },
+     "Exploit": {
+      "n": 38282,
+      "detected": 0.9922417846507497
+     },
+     "Scan": {
+      "n": 1863,
+      "detected": 0.9720880300590445
      }
     }
    }
@@ -601,6 +713,52 @@
   },
   {
    "experiment": "seq_combined",
+   "model": "LSTM-NoTiming-AdvAdaptive",
+   "train_ds": "combined",
+   "test_ds": "cicids2017",
+   "setting": "per-host sequence",
+   "metrics": {
+    "precision": 0.9970179271125906,
+    "recall": 0.9895151021531896,
+    "f1": 0.9932523461339168,
+    "fpr": 0.00101035021558054,
+    "n_test": 342530,
+    "n_attack": 87173,
+    "roc_auc": 0.9999164420799505,
+    "per_category": {
+     "Benign": {
+      "n": 255357,
+      "detected": 0.00101035021558054
+     },
+     "Botnet": {
+      "n": 241,
+      "detected": 0.11618257261410789
+     },
+     "BruteForce": {
+      "n": 463,
+      "detected": 1.0
+     },
+     "DoS": {
+      "n": 57135,
+      "detected": 0.9948017852454712
+     },
+     "Exploit": {
+      "n": 6,
+      "detected": 0.3333333333333333
+     },
+     "Scan": {
+      "n": 29319,
+      "detected": 0.986356969883011
+     },
+     "WebAttack": {
+      "n": 9,
+      "detected": 1.0
+     }
+    }
+   }
+  },
+  {
+   "experiment": "seq_combined",
    "model": "XGBoost",
    "train_ds": "combined",
    "test_ds": "cicids2017",
@@ -743,6 +901,40 @@
      "Scan": {
       "n": 1863,
       "detected": 0.9253891572732152
+     }
+    }
+   }
+  },
+  {
+   "experiment": "seq_combined",
+   "model": "LSTM-NoTiming-AdvAdaptive",
+   "train_ds": "combined",
+   "test_ds": "unswnb15",
+   "setting": "per-host sequence",
+   "metrics": {
+    "precision": 0.9482179690123279,
+    "recall": 0.9710180523148717,
+    "f1": 0.9594825807860792,
+    "fpr": 0.0071016933542097024,
+    "n_test": 344727,
+    "n_attack": 40715,
+    "roc_auc": 0.9993585480587612,
+    "per_category": {
+     "Benign": {
+      "n": 304012,
+      "detected": 0.0071016933542097024
+     },
+     "DoS": {
+      "n": 570,
+      "detected": 0.9859649122807017
+     },
+     "Exploit": {
+      "n": 38282,
+      "detected": 0.972362990439371
+     },
+     "Scan": {
+      "n": 1863,
+      "detected": 0.9388083735909822
      }
     }
    }
@@ -1023,6 +1215,66 @@
   },
   {
    "experiment": "seq_robustness",
+   "model": "LSTM-NoTiming-AdvAdaptive",
+   "train_ds": "combined",
+   "test_ds": "cicids2017",
+   "setting": "eps=0.0",
+   "metrics": {
+    "detection_rate": 0.98825,
+    "eps": 0.0,
+    "n_attack_flows": 8000
+   }
+  },
+  {
+   "experiment": "seq_robustness",
+   "model": "LSTM-NoTiming-AdvAdaptive",
+   "train_ds": "combined",
+   "test_ds": "cicids2017",
+   "setting": "eps=0.25",
+   "metrics": {
+    "detection_rate": 0.987375,
+    "eps": 0.25,
+    "n_attack_flows": 8000
+   }
+  },
+  {
+   "experiment": "seq_robustness",
+   "model": "LSTM-NoTiming-AdvAdaptive",
+   "train_ds": "combined",
+   "test_ds": "cicids2017",
+   "setting": "eps=0.5",
+   "metrics": {
+    "detection_rate": 0.986625,
+    "eps": 0.5,
+    "n_attack_flows": 8000
+   }
+  },
+  {
+   "experiment": "seq_robustness",
+   "model": "LSTM-NoTiming-AdvAdaptive",
+   "train_ds": "combined",
+   "test_ds": "cicids2017",
+   "setting": "eps=1.0",
+   "metrics": {
+    "detection_rate": 0.985,
+    "eps": 1.0,
+    "n_attack_flows": 8000
+   }
+  },
+  {
+   "experiment": "seq_robustness",
+   "model": "LSTM-NoTiming-AdvAdaptive",
+   "train_ds": "combined",
+   "test_ds": "cicids2017",
+   "setting": "eps=2.0",
+   "metrics": {
+    "detection_rate": 0.98225,
+    "eps": 2.0,
+    "n_attack_flows": 8000
+   }
+  },
+  {
+   "experiment": "seq_robustness",
    "model": "LSTM",
    "train_ds": "combined",
    "test_ds": "unswnb15",
@@ -1257,6 +1509,66 @@
    "setting": "eps=2.0",
    "metrics": {
     "detection_rate": 0.305375,
+    "eps": 2.0,
+    "n_attack_flows": 8000
+   }
+  },
+  {
+   "experiment": "seq_robustness",
+   "model": "LSTM-NoTiming-AdvAdaptive",
+   "train_ds": "combined",
+   "test_ds": "unswnb15",
+   "setting": "eps=0.0",
+   "metrics": {
+    "detection_rate": 0.969875,
+    "eps": 0.0,
+    "n_attack_flows": 8000
+   }
+  },
+  {
+   "experiment": "seq_robustness",
+   "model": "LSTM-NoTiming-AdvAdaptive",
+   "train_ds": "combined",
+   "test_ds": "unswnb15",
+   "setting": "eps=0.25",
+   "metrics": {
+    "detection_rate": 0.969125,
+    "eps": 0.25,
+    "n_attack_flows": 8000
+   }
+  },
+  {
+   "experiment": "seq_robustness",
+   "model": "LSTM-NoTiming-AdvAdaptive",
+   "train_ds": "combined",
+   "test_ds": "unswnb15",
+   "setting": "eps=0.5",
+   "metrics": {
+    "detection_rate": 0.96875,
+    "eps": 0.5,
+    "n_attack_flows": 8000
+   }
+  },
+  {
+   "experiment": "seq_robustness",
+   "model": "LSTM-NoTiming-AdvAdaptive",
+   "train_ds": "combined",
+   "test_ds": "unswnb15",
+   "setting": "eps=1.0",
+   "metrics": {
+    "detection_rate": 0.966625,
+    "eps": 1.0,
+    "n_attack_flows": 8000
+   }
+  },
+  {
+   "experiment": "seq_robustness",
+   "model": "LSTM-NoTiming-AdvAdaptive",
+   "train_ds": "combined",
+   "test_ds": "unswnb15",
+   "setting": "eps=2.0",
+   "metrics": {
+    "detection_rate": 0.511875,
     "eps": 2.0,
     "n_attack_flows": 8000
    }
